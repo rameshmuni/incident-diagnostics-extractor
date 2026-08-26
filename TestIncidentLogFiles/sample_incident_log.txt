@@ -1,0 +1,18 @@
+2026-08-24 09:42:17 ERROR service=model-ops-deploy
+Deployment failed for application: fraud-detection-model-v3
+component=model-registry
+
+Traceback (most recent call last):
+  File "deploy_pipeline.py", line 87, in deploy_model
+    registry_client.push(model_artifact)
+  File "model_registry_client.py", line 142, in push
+    response = self._session.post(self.registry_url, data=payload, timeout=10)
+  File "requests/sessions.py", line 703, in post
+    return self.request("POST", url, data=data, **kwargs)
+ConnectionError: Unable to reach service: model-registry-api (connection timed out after 10s)
+
+Additional context:
+- Environment: production
+- Recent change: TLS certificate for model-registry-api rotated 2026-08-24 08:30:00
+- Retry attempts: 3
+- Last successful deployment: 2026-08-22 14:15:03

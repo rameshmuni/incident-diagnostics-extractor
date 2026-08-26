@@ -1,0 +1,15 @@
+2026-08-25 20:03:44 ERROR service=hr-agent-pipeline
+component=resume-parser
+
+Traceback (most recent call last):
+  File "resume_ingest.py", line 41, in parse_candidate
+    candidate_id = payload["candidate_id"]
+  File "resume_ingest.py", line 12, in load_payload
+    return json.loads(raw_body)
+KeyError: 'candidate_id'
+
+Additional context:
+- Environment: production
+- Recent change: upstream ATS webhook payload schema updated 2026-08-25
+- Retry attempts: 4
+- Last successful run: 2026-08-24 09:12:30
