@@ -1,0 +1,498 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AIOps Virtual Agent</title>
+<style>
+  :root {
+    --navy-900: #0f1c26;
+    --navy-800: #162835;
+    --navy-700: #1e3548;
+    --sidebar: #10202b;
+    --teal: #00b3a4;
+    --teal-dark: #009488;
+    --amber: #f79009;
+    --red: #d92d20;
+    --blue: #2e90fa;
+    --gray-bg: #eef1f4;
+    --card-bg: #ffffff;
+    --border: #dde3e8;
+    --text-dark: #1b2733;
+    --text-mid: #55636e;
+    --text-light: #8a97a1;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--gray-bg);
+    color: var(--text-dark);
+  }
+  #app { display: flex; height: 100vh; width: 100vw; }
+
+  /* ---------- sidebar ---------- */
+  #sidebar {
+    width: 64px; background: var(--sidebar); flex-shrink: 0;
+    display: flex; flex-direction: column; align-items: center;
+    padding: 16px 0; gap: 6px;
+  }
+  .side-icon {
+    width: 40px; height: 40px; border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px; color: #7f929c; cursor: pointer;
+    transition: background .15s, color .15s;
+  }
+  .side-icon:hover { background: rgba(255,255,255,.06); color: #cfe4e2; }
+  .side-icon.active { background: var(--teal); color: #06201d; }
+  .side-logo {
+    width: 36px; height: 36px; border-radius: 9px; margin-bottom: 14px;
+    background: linear-gradient(135deg, var(--teal), #0b6b62);
+    display: flex; align-items: center; justify-content: center;
+    color: white; font-weight: 700; font-size: 15px;
+  }
+
+  /* ---------- main column ---------- */
+  #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+  #topbar {
+    height: 56px; background: var(--navy-900); flex-shrink: 0;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 20px; border-bottom: 1px solid #0a141b;
+  }
+  #topbar .brand { display: flex; align-items: center; gap: 10px; }
+  #topbar .brand .title { color: #f2f5f6; font-size: 15px; font-weight: 600; }
+  #topbar .brand .crumb { color: #7f929c; font-size: 12px; }
+  #status-pill {
+    font-size: 11.5px; color: #b9c6cd; background: var(--navy-700);
+    border: 1px solid #2a4356; padding: 5px 10px; border-radius: 999px;
+    display: flex; align-items: center; gap: 6px;
+  }
+  #status-dot { width: 7px; height: 7px; border-radius: 50%; background: #6b7b84; }
+  #status-dot.ok { background: #12d6a0; }
+  #status-dot.bad { background: var(--red); }
+  #new-btn {
+    font-size: 12.5px; color: #cfe4e2; background: transparent;
+    border: 1px solid #2a4356; padding: 6px 12px; border-radius: 6px;
+    cursor: pointer; margin-left: 10px;
+  }
+  #new-btn:hover { background: var(--navy-700); }
+
+  /* ---------- chat area ---------- */
+  #chat {
+    flex: 1; overflow-y: auto; padding: 24px 0 12px;
+    display: flex; flex-direction: column; align-items: center;
+  }
+  .thread { width: 100%; max-width: 760px; padding: 0 20px; display: flex; flex-direction: column; gap: 14px; }
+
+  .row { display: flex; gap: 10px; align-items: flex-start; }
+  .row.user { justify-content: flex-end; }
+
+  .avatar {
+    width: 30px; height: 30px; border-radius: 8px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center; font-size: 15px;
+    background: linear-gradient(135deg, var(--teal), #0b6b62); color: white;
+  }
+  .avatar.user-av { background: #33475b; }
+
+  .bubble {
+    background: var(--card-bg); border: 1px solid var(--border);
+    border-radius: 12px; padding: 14px 16px; max-width: 620px;
+    font-size: 14px; line-height: 1.55; color: var(--text-dark);
+    box-shadow: 0 1px 2px rgba(16,32,43,.04);
+  }
+  .row.user .bubble {
+    background: var(--teal); color: white; border: none;
+  }
+
+  .bubble p { margin: 0 0 8px; }
+  .bubble p:last-child { margin-bottom: 0; }
+
+  .system-note {
+    align-self: center; font-size: 12px; color: var(--text-light);
+    background: #e4e9ed; padding: 5px 12px; border-radius: 999px;
+  }
+
+  .typing { display: flex; gap: 4px; padding: 4px 0; }
+  .typing span {
+    width: 6px; height: 6px; border-radius: 50%; background: #b6c0c7;
+    animation: bounce 1.2s infinite ease-in-out;
+  }
+  .typing span:nth-child(2) { animation-delay: .15s; }
+  .typing span:nth-child(3) { animation-delay: .3s; }
+  @keyframes bounce { 0%, 80%, 100% { transform: translateY(0); opacity: .5; } 40% { transform: translateY(-4px); opacity: 1; } }
+
+  /* ---------- incident match cards ---------- */
+  .matches { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+  .match-card {
+    border: 1px solid var(--border); border-radius: 9px; padding: 10px 12px;
+    display: flex; flex-direction: column; gap: 4px; background: #fbfcfd;
+  }
+  .match-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .match-id { font-family: "SFMono-Regular", Menlo, Consolas, monospace; font-size: 12.5px; font-weight: 700; color: var(--navy-800); }
+  .badge {
+    font-size: 10.5px; font-weight: 600; padding: 2px 7px; border-radius: 999px;
+    text-transform: uppercase; letter-spacing: .02em;
+  }
+  .badge.cat { background: #e7edf1; color: var(--text-mid); }
+  .badge.p2 { background: #fff1e6; color: #b5560c; }
+  .badge.p3 { background: #e7f1ff; color: #175fb0; }
+  .badge.p4 { background: #eef0f2; color: #667079; }
+  .badge.p1 { background: #fde8e6; color: #b3261e; }
+  .match-desc { font-size: 13px; color: var(--text-dark); }
+  .match-dist { font-size: 11px; color: var(--text-light); margin-left: auto; }
+
+  .match-card.selectable { cursor: pointer; transition: border-color .15s, background .15s; }
+  .match-card.selectable:hover { border-color: var(--teal); background: #f1fbfa; }
+  .match-card.none-apply {
+    border: 1px dashed #e2a23a; background: #fff8ec; cursor: pointer;
+  }
+  .match-card.none-apply:hover { background: #fff2db; }
+
+  /* ---------- action buttons ---------- */
+  .actions { margin-top: 12px; display: flex; gap: 10px; flex-wrap: wrap; }
+  .btn {
+    font-size: 13px; font-weight: 600; padding: 8px 14px; border-radius: 7px;
+    cursor: pointer; border: 1px solid transparent;
+  }
+  .btn-primary { background: var(--teal); color: white; }
+  .btn-primary:hover { background: var(--teal-dark); }
+  .btn-outline { background: white; color: var(--text-mid); border-color: var(--border); }
+  .btn-outline:hover { border-color: #b7c2c9; }
+
+  /* ---------- result cards ---------- */
+  .result-card {
+    border-radius: 10px; padding: 12px 14px; font-size: 13.5px; line-height: 1.5;
+    display: flex; gap: 10px; align-items: flex-start; margin-top: 4px;
+  }
+  .result-card.confirmed { background: #eafaf3; border: 1px solid #b7ecd3; color: #0b6b3f; }
+  .result-card.corrected { background: #eaf3ff; border: 1px solid #bcd8ff; color: #144b8f; }
+  .result-card.escalated { background: #fff4e5; border: 1px solid #ffd9a1; color: #8a4b0a; }
+  .result-icon { font-size: 16px; }
+
+  /* ---------- input bar ---------- */
+  #inputbar {
+    flex-shrink: 0; padding: 16px 20px 20px; display: flex; justify-content: center;
+    background: linear-gradient(180deg, rgba(238,241,244,0), var(--gray-bg) 30%);
+  }
+  #inputwrap {
+    width: 100%; max-width: 760px; display: flex; align-items: flex-end; gap: 10px;
+    background: white; border: 1px solid var(--border); border-radius: 14px;
+    padding: 8px 8px 8px 16px; box-shadow: 0 2px 6px rgba(16,32,43,.05);
+  }
+  #incident-text {
+    flex: 1; border: none; outline: none; resize: none; font-size: 14px;
+    font-family: inherit; line-height: 1.5; max-height: 140px; padding: 8px 0;
+  }
+  #send-btn {
+    width: 38px; height: 38px; border-radius: 10px; border: none; flex-shrink: 0;
+    background: var(--teal); color: white; font-size: 16px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #send-btn:disabled { background: #c4d4d1; cursor: not-allowed; }
+  #hint { text-align: center; font-size: 11px; color: var(--text-light); margin-top: 8px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="sidebar">
+    <div class="side-logo">AI</div>
+    <div class="side-icon" title="Home">&#8962;</div>
+    <div class="side-icon" title="Incidents">&#9776;</div>
+    <div class="side-icon active" title="Assistant">&#9998;</div>
+    <div class="side-icon" title="Settings">&#9881;</div>
+  </div>
+
+  <div id="main">
+    <div id="topbar">
+      <div class="brand">
+        <span class="title">AIOps Virtual Agent</span>
+        <span class="crumb">Self-Service &nbsp;&rsaquo;&nbsp; Incident Diagnostics</span>
+      </div>
+      <div style="display:flex; align-items:center;">
+        <div id="status-pill"><span id="status-dot"></span><span id="status-text">Connecting…</span></div>
+        <button id="new-btn" onclick="resetThread()">+ New Incident</button>
+      </div>
+    </div>
+
+    <div id="chat">
+      <div class="thread" id="thread"></div>
+    </div>
+
+    <div id="inputbar">
+      <div id="inputwrap">
+        <textarea id="incident-text" rows="1" placeholder="Describe the new incident…"></textarea>
+        <button id="send-btn" onclick="sendIncident()">&#10148;</button>
+      </div>
+    </div>
+    <div id="hint">Retrieval: FAISS over resolved ServiceNow incidents &nbsp;·&nbsp; Reasoning: local SLM (Ollama) &nbsp;·&nbsp; Every answer is confirmed by a human before it's final</div>
+  </div>
+</div>
+
+<script>
+const thread = document.getElementById('thread');
+const textEl = document.getElementById('incident-text');
+const sendBtn = document.getElementById('send-btn');
+let awaitingVerdict = false;
+
+function el(tag, cls, html) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (html !== undefined) e.innerHTML = html;
+  return e;
+}
+
+function scrollDown() {
+  document.getElementById('chat').scrollTop = document.getElementById('chat').scrollHeight;
+}
+
+function addUserRow(text) {
+  const row = el('div', 'row user');
+  const bubble = el('div', 'bubble', escapeHtml(text));
+  row.appendChild(bubble);
+  const av = el('div', 'avatar user-av', '&#128100;');
+  row.appendChild(av);
+  thread.appendChild(row);
+  scrollDown();
+}
+
+function addSystemNote(text) {
+  const note = el('div', 'system-note', text);
+  thread.appendChild(note);
+  scrollDown();
+}
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.innerText = s;
+  return d.innerHTML;
+}
+
+function priorityBadge(p) {
+  const map = { "1": "p1", "2": "p2", "3": "p3", "4": "p4" };
+  const cls = map[String(p)] || "p4";
+  return `<span class="badge ${cls}">P${p || '?'}</span>`;
+}
+
+function matchCardHtml(m, selectable) {
+  const desc = escapeHtml(m.short_description || '');
+  return `
+    <div class="match-top">
+      <span class="match-id">${m.incident_id}</span>
+      ${priorityBadge(m.priority)}
+      <span class="badge cat">${escapeHtml(m.category || 'Software')}</span>
+      <span class="match-dist">&Delta; ${m.distance.toFixed(3)}</span>
+    </div>
+    <div class="match-desc">${desc}</div>
+  `;
+}
+
+function addTyping() {
+  const row = el('div', 'row bot-row');
+  row.appendChild(el('div', 'avatar', '&#129302;'));
+  const bubble = el('div', 'bubble typing-bubble');
+  bubble.innerHTML = '<div class="typing"><span></span><span></span><span></span></div>';
+  row.appendChild(bubble);
+  row.id = 'typing-row';
+  thread.appendChild(row);
+  scrollDown();
+  return row;
+}
+
+function removeTyping() {
+  const t = document.getElementById('typing-row');
+  if (t) t.remove();
+}
+
+async function sendIncident() {
+  const text = textEl.value.trim();
+  if (!text || awaitingVerdict) return;
+  addUserRow(text);
+  textEl.value = '';
+  autoGrow();
+  setInputEnabled(false);
+  addTyping();
+
+  let data;
+  try {
+    const resp = await fetch('/api/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
+    data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || 'Request failed');
+  } catch (err) {
+    removeTyping();
+    addSystemNote('⚠️ Could not reach the assistant backend — is app.py running? (' + err.message + ')');
+    setInputEnabled(true);
+    return;
+  }
+
+  removeTyping();
+  renderAssistantTurn(text, data);
+}
+
+function renderAssistantTurn(text, data) {
+  const row = el('div', 'row bot-row');
+  row.appendChild(el('div', 'avatar', '&#129302;'));
+  const bubble = el('div', 'bubble');
+
+  const p = el('p', null, escapeHtml(data.suggestion).replace(/\n/g, '<br>'));
+  bubble.appendChild(p);
+
+  const matchesWrap = el('div', 'matches');
+  data.matches.forEach(m => {
+    const card = el('div', 'match-card', matchCardHtml(m));
+    matchesWrap.appendChild(card);
+  });
+  bubble.appendChild(matchesWrap);
+
+  const actions = el('div', 'actions');
+  const confirmBtn = el('button', 'btn btn-primary', `✅ Yes, ${data.slm_pick} is right`);
+  const correctBtn = el('button', 'btn btn-outline', '✏️ Not quite — let me choose');
+  actions.appendChild(confirmBtn);
+  actions.appendChild(correctBtn);
+  bubble.appendChild(actions);
+
+  row.appendChild(bubble);
+  thread.appendChild(row);
+  scrollDown();
+
+  awaitingVerdict = true;
+
+  confirmBtn.onclick = () => {
+    actions.remove();
+    submitVerdict(text, data, 'confirmed', null, bubble);
+  };
+  correctBtn.onclick = () => {
+    actions.remove();
+    showCorrectionChoices(text, data, bubble);
+  };
+}
+
+function showCorrectionChoices(text, data, bubble) {
+  const prompt = el('p', null, '<strong>Which past incident is actually the best match?</strong>');
+  bubble.appendChild(prompt);
+
+  const wrap = el('div', 'matches');
+  data.matches.forEach(m => {
+    const card = el('div', 'match-card selectable', matchCardHtml(m, true));
+    card.onclick = () => {
+      wrap.remove();
+      prompt.remove();
+      submitVerdict(text, data, 'corrected', m.incident_id, bubble);
+    };
+    wrap.appendChild(card);
+  });
+  const none = el('div', 'match-card none-apply', '🚫 <strong>None of these apply</strong> — escalate to a developer');
+  none.onclick = () => {
+    wrap.remove();
+    prompt.remove();
+    submitVerdict(text, data, 'none_apply', null, bubble);
+  };
+  wrap.appendChild(none);
+  bubble.appendChild(wrap);
+  scrollDown();
+}
+
+async function submitVerdict(text, data, verdictType, chosenId, bubble) {
+  addTyping();
+  let result;
+  try {
+    const resp = await fetch('/api/verdict', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text, matches: data.matches, slm_pick: data.slm_pick,
+        verdict: verdictType, chosen_id: chosenId,
+      }),
+    });
+    result = await resp.json();
+  } catch (err) {
+    removeTyping();
+    addSystemNote('⚠️ Could not log the verdict — is app.py running? (' + err.message + ')');
+    awaitingVerdict = false;
+    setInputEnabled(true);
+    return;
+  }
+  removeTyping();
+
+  let card;
+  if (result.result === 'confirmed') {
+    card = el('div', 'result-card confirmed',
+      `<span class="result-icon">✅</span><span>Logged as confirmed. Final answer stands as above (<strong>${result.final_id}</strong>).</span>`);
+  } else if (result.result === 'corrected') {
+    card = el('div', 'result-card corrected',
+      `<span class="result-icon">✏️</span><span>Logged your correction. Using <strong>${result.final_id}</strong>'s actual record instead:<br><br>${escapeHtml(result.final_text).replace(/\n/g, '<br>')}</span>`);
+  } else {
+    const num = result.incident_number || '(number unavailable)';
+    card = el('div', 'result-card escalated',
+      `<span class="result-icon">🚨</span><span>No confident match — opened <strong>${num}</strong> in ServiceNow (state: New) for developer investigation. Once it's resolved there, rebuild the corpus and this issue will be recognized automatically next time.</span>`);
+  }
+  bubble.appendChild(card);
+  scrollDown();
+
+  awaitingVerdict = false;
+  setInputEnabled(true);
+}
+
+function setInputEnabled(enabled) {
+  textEl.disabled = !enabled;
+  sendBtn.disabled = !enabled;
+  if (enabled) textEl.focus();
+}
+
+function resetThread() {
+  thread.innerHTML = '';
+  awaitingVerdict = false;
+  setInputEnabled(true);
+  greet();
+}
+
+function greet() {
+  const row = el('div', 'row bot-row');
+  row.appendChild(el('div', 'avatar', '&#129302;'));
+  const bubble = el('div', 'bubble',
+    "<p>👋 Hi, I'm the AIOps assistant. Describe a new incident and I'll check it against past resolved ServiceNow tickets, suggest a root cause, and ask you to confirm before anything is final.</p>");
+  row.appendChild(bubble);
+  thread.appendChild(row);
+}
+
+function autoGrow() {
+  textEl.style.height = 'auto';
+  textEl.style.height = Math.min(textEl.scrollHeight, 140) + 'px';
+}
+
+textEl.addEventListener('input', autoGrow);
+textEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendIncident();
+  }
+});
+
+async function loadStatus() {
+  const dot = document.getElementById('status-dot');
+  const text = document.getElementById('status-text');
+  try {
+    const resp = await fetch('/api/status');
+    const data = await resp.json();
+    if (data.ok) {
+      dot.className = 'ok';
+      text.textContent = `${data.corpus_size} resolved incidents · ${data.model}`;
+    } else {
+      dot.className = 'bad';
+      text.textContent = 'Index not built yet';
+    }
+  } catch (err) {
+    dot.className = 'bad';
+    text.textContent = 'Backend unreachable';
+  }
+}
+
+greet();
+loadStatus();
+</script>
+</body>
+</html>
