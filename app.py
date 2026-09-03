@@ -1,10 +1,10 @@
+import os
+
 from flask import Flask, jsonify, request, send_from_directory
 
 from query_incident import (
     ESCALATION_LOG,
-    SLM_MODEL,
     build_prompt,
-    call_slm,
     embed_query,
     escalate_to_developer,
     load_index,
@@ -12,10 +12,15 @@ from query_incident import (
     parse_slm_pick,
     search,
 )
+from query_incident_gemini import GEMINI_MODEL, call_gemini
 
 # serves static/index.html at "/" and everything else in static/ at its own path -
-# this app is just a thin HTTP wrapper around the exact same functions query_incident.py's
-# CLI uses, so the retrieval/generation logic lives in one place, not two
+# this app is just a thin HTTP wrapper around the exact same retrieval/logging functions
+# query_incident.py's CLI uses, with call_gemini() (Gemini API, free tier) standing in for
+# call_slm() (Ollama) as the reasoning step - this is the Cloud Run deployment target, so it
+# calls the hosted API rather than self-hosting a model: Cloud Run's always-free tier is
+# CPU-only, and self-hosting even a small model (Qwen) at usable latency needs paid GPU.
+# query_incident_qwen.py stays around as the local/office-laptop-only path, not used here.
 app = Flask(__name__, static_folder="static", static_url_path="")
 
 
@@ -29,7 +34,7 @@ def status():
     # lets the UI show a live "connected" strip instead of hardcoding the corpus size
     try:
         index, _metadata = load_index()
-        return jsonify({"ok": True, "corpus_size": index.ntotal, "model": SLM_MODEL})
+        return jsonify({"ok": True, "corpus_size": index.ntotal, "model": GEMINI_MODEL})
     except Exception as exc:  # noqa: BLE001 - surfacing any startup issue to the UI is the point
         return jsonify({"ok": False, "error": str(exc)}), 500
 
@@ -48,7 +53,7 @@ def api_query():
     matches = search(index, metadata, query_vector)
 
     prompt = build_prompt(text, matches)
-    suggestion = call_slm(prompt)
+    suggestion = call_gemini(prompt)
     slm_pick = parse_slm_pick(suggestion, matches)
 
     return jsonify({"matches": matches, "suggestion": suggestion, "slm_pick": slm_pick})
@@ -98,4 +103,8 @@ def api_verdict():
 
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5001)
+    # Cloud Run injects the PORT env var and expects the container to listen on 0.0.0.0 -
+    # this fallback to 5001 with debug off keeps local testing possible too, but the real
+    # entrypoint in the container is gunicorn (see Dockerfile), not this block
+    port = int(os.environ.get("PORT", 5001))
+    app.run(host="0.0.0.0", port=port)

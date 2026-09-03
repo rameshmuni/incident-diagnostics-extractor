@@ -1,0 +1,19 @@
+# never bake secrets into the image - Cloud Run gets these from Secret Manager instead
+.env
+
+__pycache__/
+*.pyc
+*.pyo
+
+# local-only logs and docs that don't belong in a deployable image
+feedback_log.jsonl
+escalated_to_developer.jsonl
+*.md
+*.docx
+*.pdf
+page-*.jpg
+learning_plan.md
+demo_checklist.md
+test_scenarios.md
+
+.git/
