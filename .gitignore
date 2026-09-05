@@ -3,13 +3,10 @@ __pycache__/
 *.pyc
 .venv/
 venv/
-unassigned_incidents_structured.json.env
-__pycache__/
-*.pyc
-.venv/
-venv/
 *.faiss
 incident_index_metadata.json
 resolved_incidents_corpus.json
 feedback_log.jsonl
 escalated_to_developer.jsonl
+.idea/
+.DS_Store
