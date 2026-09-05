@@ -12,8 +12,18 @@ escalated_to_developer.jsonl
 *.docx
 *.pdf
 page-*.jpg
+steppage-*.jpg
 learning_plan.md
+learning_plan_gcp_native.md
 demo_checklist.md
 test_scenarios.md
+
+# the raw ServiceNow pull and the old local FAISS artifacts - none of this is read at
+# runtime anymore. The corpus lives in BigQuery; resolved_incidents_corpus.json is just
+# a scratch file between fetch_resolved_incidents.py and build_bigquery_corpus.py, and
+# the .faiss/.json index files no longer get produced at all.
+resolved_incidents_corpus.json
+incident_index.faiss
+incident_index_metadata.json
 
 .git/

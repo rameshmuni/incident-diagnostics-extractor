@@ -1,55 +1,133 @@
 import sys
 import re
 import json
+import os
 from pathlib import Path
 from datetime import datetime, timezone
 
-import faiss
-import numpy as np
 import requests
-from sentence_transformers import SentenceTransformer
+from google import genai
+from google.genai import types as genai_types
+from google.cloud import bigquery
 
 from seed_resolved_incidents import BASE_URL, AUTH, HEADERS, _check, _parse_json, get_caller_sys_id
 
-INDEX_FILE = "incident_index.faiss"
-METADATA_FILE = "incident_index_metadata.json"
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+# Google-native retrieval: Gemini's embedding model stands in for sentence-transformers,
+# BigQuery's VECTOR_SEARCH stands in for FAISS. See learning_plan_gcp_native.md for the
+# full reasoning behind every choice below - this file is the code side of that plan.
+EMBEDDING_MODEL = "gemini-embedding-2"
+# Gemini Embedding 2 defaults to 3072 dims but is explicitly designed to be truncated (and
+# auto-normalizes at the truncated size too) - 768 keeps BigQuery storage/scan costs small
+# without giving up meaningful retrieval quality at this corpus size.
+EMBEDDING_DIMENSIONS = 768
+BQ_DATASET = os.environ.get("BQ_DATASET", "incident_assistant")
+BQ_TABLE = os.environ.get("BQ_TABLE", "incident_corpus")
 OLLAMA_URL = "http://localhost:11434/api/generate"
 SLM_MODEL = "llama3.2"
 TOP_K = 3
 FEEDBACK_LOG = "feedback_log.jsonl"
 ESCALATION_LOG = "escalated_to_developer.jsonl"
 
-
-def load_index():
-    # the index and its matching metadata were both written by build_faiss_index.py
-    index = faiss.read_index(INDEX_FILE)
-    metadata = json.loads(Path(METADATA_FILE).read_text())
-    return index, metadata
+_genai_client_cache = None
+_bq_client_cache = None
 
 
-_embedding_model_cache = None
+def get_genai_client():
+    # lazy + cached, same pattern the old embedding-model cache used - only built once per
+    # process, whether that process is this CLI or the long-running web service
+    global _genai_client_cache
+    if _genai_client_cache is None:
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "GEMINI_API_KEY not set. Add it to your .env file locally, or to Secret "
+                "Manager on Cloud Run - get a free key at https://aistudio.google.com/apikey"
+            )
+        _genai_client_cache = genai.Client(api_key=api_key)
+    return _genai_client_cache
 
 
-def embed_query(text, model_name=EMBEDDING_MODEL):
-    # same model used to build the index - queries and corpus have to share an embedding space.
-    # cached at module level so a long-running process (the web UI) only loads it once instead
-    # of on every single query - the CLI still only ever needs it loaded once per run anyway
-    global _embedding_model_cache
-    if _embedding_model_cache is None:
-        _embedding_model_cache = SentenceTransformer(model_name)
-    vector = _embedding_model_cache.encode([text], convert_to_numpy=True)
-    return vector.astype(np.float32)
+def get_bq_client():
+    # Cloud Run's runtime service account supplies Application Default Credentials
+    # automatically, so bigquery.Client() just works with no key file and no explicit
+    # project id - same as running `bq query` on your laptop after
+    # `gcloud auth application-default login`
+    global _bq_client_cache
+    if _bq_client_cache is None:
+        _bq_client_cache = bigquery.Client()
+    return _bq_client_cache
 
 
-def search(index, metadata, query_vector, k=TOP_K):
-    # FAISS only returns positions and distances - metadata[i] gives back the real record
-    distances, positions = index.search(query_vector, k)
+def table_ref(client=None):
+    client = client or get_bq_client()
+    return f"{client.project}.{BQ_DATASET}.{BQ_TABLE}"
+
+
+def embed_text(text, task_type, model=EMBEDDING_MODEL):
+    # task_type is asymmetric on purpose: a resolved incident already sitting in the corpus
+    # is embedded as something that will be SEARCHED FOR (RETRIEVAL_DOCUMENT), while a brand
+    # new incident is embedded as something DOING the searching (RETRIEVAL_QUERY). Gemini's
+    # embedding model produces measurably better matches when it knows which side of the
+    # search each piece of text is on, instead of treating both identically the way a single
+    # generic embed() call (what sentence-transformers did) would.
+    client = get_genai_client()
+    response = client.models.embed_content(
+        model=model,
+        contents=text,
+        config=genai_types.EmbedContentConfig(
+            task_type=task_type,
+            output_dimensionality=EMBEDDING_DIMENSIONS,
+        ),
+    )
+    return response.embeddings[0].values
+
+
+def embed_query(text):
+    # the query-side embedding of a new incident - the direct replacement for the old
+    # embed_query() that ran SentenceTransformer.encode() locally
+    return embed_text(text, task_type="RETRIEVAL_QUERY")
+
+
+def search(query_vector, k=TOP_K):
+    # the direct replacement for index.search(query_vector, k) - BigQuery does the nearest-
+    # neighbor math instead of FAISS, and hands back the real record columns directly (no
+    # separate metadata.json needed - the table row *is* the metadata now)
+    client = get_bq_client()
+    query = f"""
+        SELECT
+          base.incident_id AS incident_id,
+          base.sys_id AS sys_id,
+          base.short_description AS short_description,
+          base.category AS category,
+          base.text AS text,
+          distance
+        FROM VECTOR_SEARCH(
+            TABLE `{table_ref(client)}`,
+            'embedding',
+            (SELECT @query_vector AS embedding),
+            top_k => @k,
+            distance_type => 'COSINE',
+            options => '{{"use_brute_force":true}}'
+        )
+        ORDER BY distance ASC
+    """
+    job_config = bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ArrayQueryParameter("query_vector", "FLOAT64", query_vector),
+        bigquery.ScalarQueryParameter("k", "INT64", k),
+    ])
     return [
-        {**metadata[pos], "distance": float(dist)}
-        for pos, dist in zip(positions[0], distances[0])
-        if pos != -1
+        {**dict(row), "distance": float(row["distance"])}
+        for row in client.query(query, job_config=job_config).result()
     ]
+
+
+def corpus_size():
+    # replacement for the old index.ntotal - lets /api/status report a live count without
+    # keeping any local index object around at all
+    client = get_bq_client()
+    query = f"SELECT COUNT(*) AS n FROM `{table_ref(client)}`"
+    rows = list(client.query(query).result())
+    return rows[0]["n"] if rows else 0
 
 
 def build_prompt(new_incident_text, matches):
@@ -72,7 +150,11 @@ def build_prompt(new_incident_text, matches):
 
 
 def call_slm(prompt, model=SLM_MODEL):
-    # Ollama runs locally on 11434 - stream=False waits for the full response in one shot
+    # Ollama runs locally on 11434 - stream=False waits for the full response in one shot.
+    # Kept around for local/offline reasoning during development; not used on Cloud Run
+    # (see query_incident_gemini.py / app.py, which use call_gemini() instead). Note that
+    # retrieval itself now needs the network either way (Gemini embeddings + BigQuery), so
+    # this path saves a Gemini generation call, not a fully offline run.
     resp = requests.post(OLLAMA_URL, json={"model": model, "prompt": prompt, "stream": False}, timeout=120)
     resp.raise_for_status()
     return resp.json()["response"]
@@ -83,7 +165,7 @@ def parse_slm_pick(suggestion, matches):
     found = re.search(r"INC\d+", suggestion)
     if found and any(found.group() == m["incident_id"] for m in matches):
         return found.group()
-    return matches[0]["incident_id"]  # fall back to the top FAISS match if we can't parse one out
+    return matches[0]["incident_id"]  # fall back to the top match if we can't parse one out
 
 
 def ask_human_verdict(matches, slm_pick):
@@ -155,8 +237,9 @@ def escalate_to_developer(new_incident_text, matches, log_file=ESCALATION_LOG):
         f"\nNo confident match - opened {incident['number']} in ServiceNow (state: New) for "
         f"developer investigation (also logged to {log_file}).\n"
         "Once the team resolves it there with a proper Root Cause + Resolution in the close notes, "
-        "re-run fetch_resolved_incidents.py then build_faiss_index.py to fold it into the corpus - "
-        "the next time this same issue comes in, it'll be retrieved and suggested automatically."
+        "re-run fetch_resolved_incidents.py then build_bigquery_corpus.py to fold it into the "
+        "corpus - the next time this same issue comes in, it'll be retrieved and suggested "
+        "automatically."
     )
     return incident
 
@@ -166,9 +249,8 @@ def main(new_incident_text=None):
     if new_incident_text is None:
         new_incident_text = input("Describe the new incident: ")
 
-    index, metadata = load_index()
     query_vector = embed_query(new_incident_text)
-    matches = search(index, metadata, query_vector)
+    matches = search(query_vector)
 
     print("\nClosest past incidents:")
     for m in matches:

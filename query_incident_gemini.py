@@ -8,17 +8,15 @@ from query_incident import (
     build_prompt,
     embed_query,
     escalate_to_developer,
-    load_index,
     log_feedback,
     parse_slm_pick,
     search,
 )
 
-# Same retrieval logic as query_incident.py (FAISS + the local embedding model, and the
-# same human-verdict / feedback-log / escalation logic) - the only thing that's different
-# is the reasoning step, which calls Gemini's API instead of a local Ollama model. Useful
-# on a machine that can't run Ollama locally, at the cost of incident text leaving the
-# machine for Google's API - worth knowing, same as any cloud LLM call.
+# Same retrieval logic as query_incident.py (Gemini embeddings + BigQuery VECTOR_SEARCH, and
+# the same human-verdict / feedback-log / escalation logic) - the only thing that's different
+# is the reasoning step, which calls Gemini's API instead of a local Ollama model. This is
+# the retrieval + reasoning path app.py actually uses on Cloud Run.
 
 GEMINI_MODEL = "gemini-3.6-flash"
 
@@ -51,9 +49,8 @@ def main(new_incident_text=None):
     if new_incident_text is None:
         new_incident_text = input("Describe the new incident: ")
 
-    index, metadata = load_index()
     query_vector = embed_query(new_incident_text)
-    matches = search(index, metadata, query_vector)
+    matches = search(query_vector)
 
     print("\nClosest past incidents:")
     for m in matches:

@@ -14,7 +14,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# everything else: app.py, query_incident*.py, static/, the incident_index.* files, etc.
+# everything else: app.py, query_incident*.py, static/, etc. Notably NOT any local index
+# files anymore - the corpus lives in BigQuery now, not baked into this image, so refreshing
+# it (via the Cloud Run Job) never requires rebuilding or redeploying this image at all.
 # (.dockerignore keeps out the stuff that shouldn't be in the image - see that file)
 COPY . .
 
