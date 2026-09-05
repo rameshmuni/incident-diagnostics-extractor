@@ -26,7 +26,7 @@ app = Flask(__name__, static_folder="static", static_url_path="")
 
 @app.route("/")
 def home():
-    return send_from_directory(app.static_folder, "index.html")
+    return send_from_directory(app.static_folder, "static/index.html")
 
 
 @app.route("/api/status")
