@@ -2,6 +2,7 @@ import sys
 import re
 import json
 import os
+import time
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -63,6 +64,34 @@ def table_ref(client=None):
     return f"{client.project}.{BQ_DATASET}.{BQ_TABLE}"
 
 
+EMBED_MAX_RETRIES = 5
+EMBED_INITIAL_BACKOFF_SECONDS = 4
+
+
+def _embed_with_retry(contents, task_type, model=EMBEDDING_MODEL):
+    # Every embed_content() call - even one with a single string - goes over the same
+    # batchEmbedContents transport under the hood in this SDK, and that endpoint's rate
+    # limit is tighter than you'd expect from calling it a lot in a tight loop (this is a
+    # known rough edge - see googleapis/python-genai#427). A single 429 shouldn't take down
+    # the whole refresh job, so this retries with exponential backoff before giving up.
+    client = get_genai_client()
+    config = genai_types.EmbedContentConfig(
+        task_type=task_type,
+        output_dimensionality=EMBEDDING_DIMENSIONS,
+    )
+    delay = EMBED_INITIAL_BACKOFF_SECONDS
+    for attempt in range(1, EMBED_MAX_RETRIES + 1):
+        try:
+            return client.models.embed_content(model=model, contents=contents, config=config)
+        except Exception as exc:  # noqa: BLE001 - only rate-limit errors get retried, everything else re-raises
+            is_rate_limited = "RESOURCE_EXHAUSTED" in str(exc) or "429" in str(exc)
+            if not is_rate_limited or attempt == EMBED_MAX_RETRIES:
+                raise
+            print(f"Embedding rate-limited (attempt {attempt}/{EMBED_MAX_RETRIES}), waiting {delay}s...")
+            time.sleep(delay)
+            delay *= 2
+
+
 def embed_text(text, task_type, model=EMBEDDING_MODEL):
     # task_type is asymmetric on purpose: a resolved incident already sitting in the corpus
     # is embedded as something that will be SEARCHED FOR (RETRIEVAL_DOCUMENT), while a brand
@@ -70,16 +99,20 @@ def embed_text(text, task_type, model=EMBEDDING_MODEL):
     # embedding model produces measurably better matches when it knows which side of the
     # search each piece of text is on, instead of treating both identically the way a single
     # generic embed() call (what sentence-transformers did) would.
-    client = get_genai_client()
-    response = client.models.embed_content(
-        model=model,
-        contents=text,
-        config=genai_types.EmbedContentConfig(
-            task_type=task_type,
-            output_dimensionality=EMBEDDING_DIMENSIONS,
-        ),
-    )
+    response = _embed_with_retry(text, task_type, model=model)
     return response.embeddings[0].values
+
+
+def embed_texts_batch(texts, task_type, model=EMBEDDING_MODEL):
+    # the corpus-building equivalent of embed_text() - one API call embeds a whole chunk of
+    # records at once (Gemini's embed_content accepts a list of strings and returns one
+    # embedding per string, in order), instead of one call per record. This is the actual
+    # fix for the 429s: 102 records as ~5 calls of 20 each is far less likely to trip a
+    # rate limit than 102 individual calls fired back to back ever was.
+    if not texts:
+        return []
+    response = _embed_with_retry(texts, task_type, model=model)
+    return [e.values for e in response.embeddings]
 
 
 def embed_query(text):

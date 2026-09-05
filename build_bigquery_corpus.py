@@ -1,11 +1,20 @@
 import json
+import time
 from pathlib import Path
 
 from google.cloud import bigquery
 
-from query_incident import BQ_DATASET, embed_text, get_bq_client, table_ref
+from query_incident import BQ_DATASET, embed_texts_batch, get_bq_client, table_ref
 
 CORPUS_FILE = "resolved_incidents_corpus.json"
+# chunk size for embedding calls - well under any documented/observed batch rate limit,
+# and cuts a 100+ record corpus down to ~5 API calls instead of 100+ individual ones (the
+# actual cause of the 429 RESOURCE_EXHAUSTED errors this replaced - see embed_texts_batch()
+# and _embed_with_retry() in query_incident.py for the full story)
+EMBED_BATCH_SIZE = 20
+# small pause between chunks - extra headroom against per-minute quotas, on top of the
+# retry/backoff embed_texts_batch() already does for an individual chunk
+SECONDS_BETWEEN_BATCHES = 2
 
 # the BigQuery equivalent of incident_index_metadata.json's shape, plus the one column
 # FAISS used to keep separately (in the .faiss file itself): the embedding.
@@ -27,9 +36,19 @@ def load_corpus(path=CORPUS_FILE):
 def embed_records(records):
     # RETRIEVAL_DOCUMENT: these are the "answer side" of the search, not the "question side" -
     # see embed_text()'s docstring in query_incident.py for why the corpus and an incoming
-    # query get different task_type values even though they go through the same model
-    for r in records:
-        r["embedding"] = embed_text(r["text"], task_type="RETRIEVAL_DOCUMENT")
+    # query get different task_type values even though they go through the same model.
+    #
+    # Embedded in chunks (EMBED_BATCH_SIZE records per API call), not one record per call -
+    # see embed_texts_batch() in query_incident.py for why that matters.
+    for start in range(0, len(records), EMBED_BATCH_SIZE):
+        chunk = records[start : start + EMBED_BATCH_SIZE]
+        texts = [r["text"] for r in chunk]
+        vectors = embed_texts_batch(texts, task_type="RETRIEVAL_DOCUMENT")
+        for record, vector in zip(chunk, vectors):
+            record["embedding"] = vector
+        print(f"Embedded {start + len(chunk)}/{len(records)} record(s)...")
+        if start + EMBED_BATCH_SIZE < len(records):
+            time.sleep(SECONDS_BETWEEN_BATCHES)
     return records
 
 
