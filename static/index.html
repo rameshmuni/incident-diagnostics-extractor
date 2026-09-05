@@ -225,7 +225,7 @@
         <button id="send-btn" onclick="sendIncident()">&#10148;</button>
       </div>
     </div>
-    <div id="hint">Retrieval: FAISS over resolved ServiceNow incidents &nbsp;·&nbsp; Reasoning: local SLM (Ollama) &nbsp;·&nbsp; Every answer is confirmed by a human before it's final</div>
+    <div id="hint">Retrieval: Gemini embeddings + BigQuery vector search over resolved ServiceNow incidents &nbsp;·&nbsp; Reasoning: Gemini &nbsp;·&nbsp; Every answer is confirmed by a human before it's final</div>
   </div>
 </div>
 
@@ -324,7 +324,7 @@ async function sendIncident() {
     if (!resp.ok) throw new Error(data.error || 'Request failed');
   } catch (err) {
     removeTyping();
-    addSystemNote('⚠️ Could not reach the assistant backend — is app.py running? (' + err.message + ')');
+    addSystemNote('⚠️ The backend hit an error: ' + err.message);
     setInputEnabled(true);
     return;
   }
@@ -409,9 +409,10 @@ async function submitVerdict(text, data, verdictType, chosenId, bubble) {
       }),
     });
     result = await resp.json();
+    if (!resp.ok) throw new Error(result.error || 'Request failed');
   } catch (err) {
     removeTyping();
-    addSystemNote('⚠️ Could not log the verdict — is app.py running? (' + err.message + ')');
+    addSystemNote('⚠️ The backend hit an error logging your verdict: ' + err.message);
     awaitingVerdict = false;
     setInputEnabled(true);
     return;

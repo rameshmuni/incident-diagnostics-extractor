@@ -44,62 +44,77 @@ def status():
 def api_query():
     # same retrieval + generation steps as main() in query_incident.py, minus the blocking
     # input() call - the human verdict happens as a separate request once the UI has rendered
-    data = request.get_json(force=True)
-    text = (data.get("text") or "").strip()
-    if not text:
-        return jsonify({"error": "Incident text is required"}), 400
+    #
+    # Everything below is wrapped in try/except on purpose: without it, any exception here
+    # (a rate-limited embed call, a BigQuery error, a Gemini generation error) falls through
+    # to Flask's default error handler, which returns an HTML error page - and the frontend's
+    # `await resp.json()` then throws its own confusing "Unexpected token '<'" parse error on
+    # top of whatever actually went wrong, hiding the real cause. Returning JSON here even on
+    # failure means the UI shows the actual error message instead of that generic one.
+    try:
+        data = request.get_json(force=True)
+        text = (data.get("text") or "").strip()
+        if not text:
+            return jsonify({"error": "Incident text is required"}), 400
 
-    query_vector = embed_query(text)
-    matches = search(query_vector)
+        query_vector = embed_query(text)
+        matches = search(query_vector)
 
-    prompt = build_prompt(text, matches)
-    suggestion = call_gemini(prompt)
-    slm_pick = parse_slm_pick(suggestion, matches)
+        prompt = build_prompt(text, matches)
+        suggestion = call_gemini(prompt)
+        slm_pick = parse_slm_pick(suggestion, matches)
 
-    return jsonify({"matches": matches, "suggestion": suggestion, "slm_pick": slm_pick})
+        return jsonify({"matches": matches, "suggestion": suggestion, "slm_pick": slm_pick})
+    except Exception as exc:  # noqa: BLE001 - surfacing the real error to the UI is the point
+        return jsonify({"error": str(exc)}), 500
 
 
 @app.route("/api/verdict", methods=["POST"])
 def api_verdict():
     # same three branches as ask_human_verdict()/main() in query_incident.py, driven by a
-    # button click in the UI instead of a y/n + number prompt in the terminal
-    data = request.get_json(force=True)
-    text = data["text"]
-    matches = data["matches"]
-    slm_pick = data["slm_pick"]
-    verdict_type = data["verdict"]  # "confirmed" | "corrected" | "none_apply"
-    chosen_id = data.get("chosen_id")
+    # button click in the UI instead of a y/n + number prompt in the terminal.
+    # Wrapped for the same reason as api_query() above - a failed ServiceNow escalation
+    # call, for instance, should come back as a readable JSON error, not an HTML error page.
+    try:
+        data = request.get_json(force=True)
+        text = data["text"]
+        matches = data["matches"]
+        slm_pick = data["slm_pick"]
+        verdict_type = data["verdict"]  # "confirmed" | "corrected" | "none_apply"
+        chosen_id = data.get("chosen_id")
 
-    if verdict_type == "confirmed":
-        verdict = {"verdict": "confirmed", "chosen_id": slm_pick, "chosen_text": None}
-    elif verdict_type == "corrected":
-        chosen = next(m for m in matches if m["incident_id"] == chosen_id)
-        verdict = {"verdict": "corrected", "chosen_id": chosen_id, "chosen_text": chosen["text"]}
-    else:
-        verdict = {"verdict": "none_apply", "chosen_id": None, "chosen_text": None}
+        if verdict_type == "confirmed":
+            verdict = {"verdict": "confirmed", "chosen_id": slm_pick, "chosen_text": None}
+        elif verdict_type == "corrected":
+            chosen = next(m for m in matches if m["incident_id"] == chosen_id)
+            verdict = {"verdict": "corrected", "chosen_id": chosen_id, "chosen_text": chosen["text"]}
+        else:
+            verdict = {"verdict": "none_apply", "chosen_id": None, "chosen_text": None}
 
-    log_feedback(text, matches, slm_pick, verdict)
+        log_feedback(text, matches, slm_pick, verdict)
 
-    if verdict["verdict"] == "confirmed":
-        return jsonify({"result": "confirmed", "final_id": slm_pick})
+        if verdict["verdict"] == "confirmed":
+            return jsonify({"result": "confirmed", "final_id": slm_pick})
 
-    if verdict["verdict"] == "corrected":
+        if verdict["verdict"] == "corrected":
+            return jsonify(
+                {
+                    "result": "corrected",
+                    "final_id": verdict["chosen_id"],
+                    "final_text": verdict["chosen_text"],
+                }
+            )
+
+        incident = escalate_to_developer(text, matches)
         return jsonify(
             {
-                "result": "corrected",
-                "final_id": verdict["chosen_id"],
-                "final_text": verdict["chosen_text"],
+                "result": "escalated",
+                "incident_number": incident["number"] if incident else None,
+                "log_file": ESCALATION_LOG,
             }
         )
-
-    incident = escalate_to_developer(text, matches)
-    return jsonify(
-        {
-            "result": "escalated",
-            "incident_number": incident["number"] if incident else None,
-            "log_file": ESCALATION_LOG,
-        }
-    )
+    except Exception as exc:  # noqa: BLE001 - surfacing the real error to the UI is the point
+        return jsonify({"error": str(exc)}), 500
 
 
 if __name__ == "__main__":
