@@ -69,12 +69,11 @@ EMBED_MAX_RETRIES = 5
 EMBED_INITIAL_BACKOFF_SECONDS = 4
 
 
-def _embed_with_retry(contents, task_type, model=EMBEDDING_MODEL):
-    # Every embed_content() call - even one with a single string - goes over the same
-    # batchEmbedContents transport under the hood in this SDK, and that endpoint's rate
-    # limit is tighter than you'd expect from calling it a lot in a tight loop (this is a
-    # known rough edge - see googleapis/python-genai#427). A single 429 shouldn't take down
-    # the whole refresh job, so this retries with exponential backoff before giving up.
+def _embed_with_retry(text, task_type, model=EMBEDDING_MODEL):
+    # One text per call, on purpose - see embed_text()'s comment below for why passing
+    # multiple texts to gemini-embedding-2 in one call turned out to silently drop almost
+    # all of them instead of erroring. A single 429 (or a bad/empty response) shouldn't
+    # take down the whole refresh job, so this retries with exponential backoff first.
     client = get_genai_client()
     config = genai_types.EmbedContentConfig(
         task_type=task_type,
@@ -83,30 +82,28 @@ def _embed_with_retry(contents, task_type, model=EMBEDDING_MODEL):
     delay = EMBED_INITIAL_BACKOFF_SECONDS
     for attempt in range(1, EMBED_MAX_RETRIES + 1):
         try:
-            return client.models.embed_content(model=model, contents=contents, config=config)
-        except Exception as exc:  # noqa: BLE001 - only rate-limit errors get retried, everything else re-raises
-            is_rate_limited = "RESOURCE_EXHAUSTED" in str(exc) or "429" in str(exc)
-            if not is_rate_limited or attempt == EMBED_MAX_RETRIES:
+            response = client.models.embed_content(model=model, contents=text, config=config)
+            values = response.embeddings[0].values
+            if not values:
+                # Seen in practice: no exception raised, but the returned embedding is
+                # empty. Treat that as a failure worth retrying, same as a 429 - the
+                # alternative is silently writing a useless all-empty vector into BigQuery.
+                raise RuntimeError("embed_content returned an empty embedding")
+            return values
+        except Exception as exc:  # noqa: BLE001 - only retryable cases get retried, everything else re-raises
+            is_retryable = "RESOURCE_EXHAUSTED" in str(exc) or "429" in str(exc) or "empty embedding" in str(exc)
+            if not is_retryable or attempt == EMBED_MAX_RETRIES:
                 raise
-            print(f"Embedding rate-limited (attempt {attempt}/{EMBED_MAX_RETRIES}), waiting {delay}s...")
+            print(f"Embedding attempt {attempt}/{EMBED_MAX_RETRIES} failed ({exc}), waiting {delay}s...")
             time.sleep(delay)
             delay *= 2
 
 
 def _fit_dimensions(vector, dimensions=EMBEDDING_DIMENSIONS):
-    # BigQuery's VECTOR_SEARCH refuses to compare a query vector against the base table if
-    # their lengths don't match ("Dimension of column `embedding` in the base table does not
-    # match the dimension of column `embedding` in the query data") - hit this in practice
-    # because corpus vectors came back at the requested 768 while query-time vectors came
-    # back at the model's full 3072, even though both calls asked for output_dimensionality=768.
-    # Rather than trust the API to honor that config identically across every call shape
-    # (single text vs a batch of texts), this forces the point ourselves: Gemini's embedding
-    # models are explicitly designed so a PREFIX of the full embedding is itself a valid,
-    # smaller embedding (Matryoshka-style) - it just needs re-normalizing to unit length
-    # afterward, which is what the API does for you when it honors output_dimensionality
-    # itself. Doing it here too means every embedding this app produces is guaranteed to be
-    # exactly `dimensions` long and unit-normalized, corpus and query alike, no matter what
-    # the API actually returned.
+    # Defensive only at this point - output_dimensionality in the config above should
+    # already produce exactly `dimensions` values, but this guarantees it (and re-
+    # normalizes to unit length, which Gemini's embedding models require after any
+    # truncation) rather than trusting that to always hold.
     if len(vector) <= dimensions:
         return vector
     truncated = vector[:dimensions]
@@ -121,20 +118,17 @@ def embed_text(text, task_type, model=EMBEDDING_MODEL):
     # embedding model produces measurably better matches when it knows which side of the
     # search each piece of text is on, instead of treating both identically the way a single
     # generic embed() call (what sentence-transformers did) would.
-    response = _embed_with_retry(text, task_type, model=model)
-    return _fit_dimensions(response.embeddings[0].values)
-
-
-def embed_texts_batch(texts, task_type, model=EMBEDDING_MODEL):
-    # the corpus-building equivalent of embed_text() - one API call embeds a whole chunk of
-    # records at once (Gemini's embed_content accepts a list of strings and returns one
-    # embedding per string, in order), instead of one call per record. This is the actual
-    # fix for the 429s: 102 records as ~5 calls of 20 each is far less likely to trip a
-    # rate limit than 102 individual calls fired back to back ever was.
-    if not texts:
-        return []
-    response = _embed_with_retry(texts, task_type, model=model)
-    return [_fit_dimensions(e.values) for e in response.embeddings]
+    #
+    # One text per call - an earlier version of this function batched many texts into one
+    # embed_content() call to cut down on API calls (Google's own docs show this as a
+    # supported pattern, for an older model). For gemini-embedding-2 specifically it turned
+    # out to silently return an empty embedding for almost every text in the batch instead
+    # of erroring - roughly one real result per batch, no matter the batch size - which
+    # went unnoticed until BigQuery refused to compare the resulting mixed-dimension
+    # vectors. One call per text is slower but actually correct for this model; see
+    # build_bigquery_corpus.py for how the corpus-building loop paces these calls to avoid
+    # the rate-limit problem batching was originally introduced to solve.
+    return _fit_dimensions(_embed_with_retry(text, task_type, model=model))
 
 
 def embed_query(text):
