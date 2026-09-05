@@ -1,6 +1,7 @@
 import sys
 import re
 import json
+import math
 import os
 import time
 from pathlib import Path
@@ -92,6 +93,27 @@ def _embed_with_retry(contents, task_type, model=EMBEDDING_MODEL):
             delay *= 2
 
 
+def _fit_dimensions(vector, dimensions=EMBEDDING_DIMENSIONS):
+    # BigQuery's VECTOR_SEARCH refuses to compare a query vector against the base table if
+    # their lengths don't match ("Dimension of column `embedding` in the base table does not
+    # match the dimension of column `embedding` in the query data") - hit this in practice
+    # because corpus vectors came back at the requested 768 while query-time vectors came
+    # back at the model's full 3072, even though both calls asked for output_dimensionality=768.
+    # Rather than trust the API to honor that config identically across every call shape
+    # (single text vs a batch of texts), this forces the point ourselves: Gemini's embedding
+    # models are explicitly designed so a PREFIX of the full embedding is itself a valid,
+    # smaller embedding (Matryoshka-style) - it just needs re-normalizing to unit length
+    # afterward, which is what the API does for you when it honors output_dimensionality
+    # itself. Doing it here too means every embedding this app produces is guaranteed to be
+    # exactly `dimensions` long and unit-normalized, corpus and query alike, no matter what
+    # the API actually returned.
+    if len(vector) <= dimensions:
+        return vector
+    truncated = vector[:dimensions]
+    norm = math.sqrt(sum(v * v for v in truncated))
+    return [v / norm for v in truncated] if norm else truncated
+
+
 def embed_text(text, task_type, model=EMBEDDING_MODEL):
     # task_type is asymmetric on purpose: a resolved incident already sitting in the corpus
     # is embedded as something that will be SEARCHED FOR (RETRIEVAL_DOCUMENT), while a brand
@@ -100,7 +122,7 @@ def embed_text(text, task_type, model=EMBEDDING_MODEL):
     # search each piece of text is on, instead of treating both identically the way a single
     # generic embed() call (what sentence-transformers did) would.
     response = _embed_with_retry(text, task_type, model=model)
-    return response.embeddings[0].values
+    return _fit_dimensions(response.embeddings[0].values)
 
 
 def embed_texts_batch(texts, task_type, model=EMBEDDING_MODEL):
@@ -112,7 +134,7 @@ def embed_texts_batch(texts, task_type, model=EMBEDDING_MODEL):
     if not texts:
         return []
     response = _embed_with_retry(texts, task_type, model=model)
-    return [e.values for e in response.embeddings]
+    return [_fit_dimensions(e.values) for e in response.embeddings]
 
 
 def embed_query(text):
