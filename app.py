@@ -13,7 +13,7 @@ from query_incident import (
     search,
 )
 from query_incident_gemini import GEMINI_MODEL, call_gemini
-from week3.auto_remediation import attempt_auto_remediation, raise_event_incident, resolve_event_incident
+from week3.auto_remediation import attempt_auto_remediation
 from week3.demo_app import demo_bp
 from week3 import mock_systems
 
@@ -155,56 +155,17 @@ def demo_break():
     # an API call against the *running service* itself, not a CLI script run somewhere else,
     # or "break" and "fix" would end up touching two different filesystems entirely. Calling
     # mock_systems.break_issue() here is what keeps the demo's before/after state consistent.
+    #
+    # Deliberately does NOT touch ServiceNow at all - the demo app only breaks a real thing,
+    # nothing more. Raising an incident is a human's job: they notice the app is broken and
+    # report it through the chat (human_in_loop off), which is what actually creates and
+    # resolves the incident - see attempt_auto_remediation() in auto_remediation.py. Keeping
+    # this route ServiceNow-free means the demo app genuinely doesn't know ServiceNow exists.
     try:
         data = request.get_json(force=True)
         issue_id = data.get("issue_id")
         state = mock_systems.break_issue(issue_id)
-    except Exception as exc:  # noqa: BLE001
-        return jsonify({"ok": False, "error": str(exc)}), 400
-
-    # this is the actual "webhook simulating a system alert" from the Week 3 assignment:
-    # breaking a known scenario is treated as the moment a real monitor would have noticed
-    # the fault and opened a ticket, so a REAL ServiceNow incident gets raised right here -
-    # deliberately best-effort (wrapped separately from the state break above) so a
-    # ServiceNow hiccup never blocks the demo app from visibly breaking, which has to stay
-    # reliable regardless of ServiceNow's own availability.
-    event, event_error = None, None
-    try:
-        event = raise_event_incident(issue_id)
-        mock_systems.record_open_incident(issue_id, event["incident_sys_id"], event["incident_number"])
-    except Exception as exc:  # noqa: BLE001
-        event_error = str(exc)
-
-    return jsonify({"ok": True, "state": mock_systems.get_state(), "event": event, "event_error": event_error})
-
-
-@app.route("/api/demo/fix", methods=["POST"])
-def demo_fix():
-    # the other half of the loop: runs the real remedy for issue_id and resolves the exact
-    # ServiceNow incident /api/demo/break raised for it (tracked via mock_systems'
-    # open_incidents) - same incident, not a new one.
-    #
-    # Deliberately refuses to run at all if there's no open incident on record: the whole
-    # point of "event-driven" is that the remedy is a response to a real alert, not a
-    # free-standing button, so on the real deployed app the fix genuinely cannot begin
-    # before an incident exists. (This is what makes /api/demo/break's ServiceNow step
-    # best-effort rather than required above - if it ever fails, this refusal is what
-    # actually enforces the "no incident, no fix" rule, not just wishful sequencing.)
-    try:
-        data = request.get_json(force=True)
-        issue_id = data.get("issue_id")
-        open_incident = mock_systems.pop_open_incident(issue_id)
-        if open_incident is None:
-            return jsonify({
-                "ok": False,
-                "error": (
-                    "No open ServiceNow incident for this issue - the remedy only runs in "
-                    "response to a real incident. Break it first (which raises the alert), "
-                    "then Fix."
-                ),
-            }), 400
-        result = resolve_event_incident(issue_id, open_incident["sys_id"])
-        return jsonify({"ok": True, "state": mock_systems.get_state(), "event": result})
+        return jsonify({"ok": True, "state": state})
     except Exception as exc:  # noqa: BLE001
         return jsonify({"ok": False, "error": str(exc)}), 400
 

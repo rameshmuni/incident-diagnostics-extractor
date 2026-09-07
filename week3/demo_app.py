@@ -121,12 +121,6 @@ _SHELL = """
   }
   .dc-break { background: transparent; color: #e2908c; border: 1px solid #4a2c2a; }
   .dc-break:hover:not(:disabled) { background: var(--red); border-color: var(--red); color: white; }
-  .dc-fix { background: transparent; color: #7fd9c9; border: 1px solid #1f4a44; }
-  .dc-fix:hover:not(:disabled) { background: var(--teal); border-color: var(--teal); color: #06201d; }
-  .dc-event {
-    margin-top: 10px; font-size: 11px; color: #cfe4e2; background: rgba(255,255,255,.04);
-    border: 1px solid #24404f; border-radius: 6px; padding: 7px 9px; line-height: 1.5;
-  }
   #dc-reset {
     margin-top: 10px; max-width: 420px; padding: 6px; font-size: 11.5px;
     background: transparent; color: #7f929c; border: 1px solid #2a4356; border-radius: 6px;
@@ -155,25 +149,20 @@ _SHELL = """
         <div class="dc-row">
           <span class="dc-label">App Down</span>
           <button class="dc-btn dc-break" data-issue="app_down">Break</button>
-          <button class="dc-btn dc-fix" data-issue="app_down">Fix</button>
         </div>
         <div class="dc-row">
           <span class="dc-label">Login UI disabled</span>
           <button class="dc-btn dc-break" data-issue="login_ui_disabled">Break</button>
-          <button class="dc-btn dc-fix" data-issue="login_ui_disabled">Fix</button>
         </div>
         <div class="dc-row">
           <span class="dc-label">Login backend broken</span>
           <button class="dc-btn dc-break" data-issue="login_cred_backend">Break</button>
-          <button class="dc-btn dc-fix" data-issue="login_cred_backend">Fix</button>
         </div>
         <div class="dc-row">
           <span class="dc-label">Upload permission</span>
           <button class="dc-btn dc-break" data-issue="upload_permission">Break</button>
-          <button class="dc-btn dc-fix" data-issue="upload_permission">Fix</button>
         </div>
       </div>
-      <div id="dc-event" class="dc-event" hidden></div>
       <button id="dc-reset">Reset everything to healthy</button>
     </div>
   </div>
@@ -182,17 +171,14 @@ _SHELL = """
   (function () {
     var tray = document.getElementById('dc-tray');
     var handle = document.getElementById('dc-handle');
-    var eventBox = document.getElementById('dc-event');
 
     function refreshState() {
       fetch('/api/demo/state').then(function (r) { return r.json(); }).then(function (s) {
-        var openCount = s.open_incidents ? Object.keys(s.open_incidents).length : 0;
         var lines = [
           'app_down: ' + s.app_down,
           'login_ui_enabled: ' + s.login_ui_enabled,
           'login_cred_backend_ok: ' + s.login_cred_backend_ok,
           'upload_permission_ok: ' + s.upload_permission_ok,
-          'open ServiceNow incidents: ' + openCount,
         ];
         document.getElementById('dc-state').textContent = lines.join('  |  ');
       });
@@ -204,46 +190,19 @@ _SHELL = """
       if (tray.classList.contains('open')) { refreshState(); }
     });
 
-    function showEvent(res) {
-      if (!eventBox) return;
-      if (res.ok === false) {
-        // most common case here: Fix refused because no incident was raised yet (see
-        // app.py's /api/demo/fix) - surfaced as-is so the reason is clear
-        eventBox.textContent = res.error || 'Request failed.';
-        eventBox.hidden = false;
-      } else if (res.event && res.event.incident_number) {
-        var firstLine = (res.event.resolution_text || '').split('\\n')[0];
-        eventBox.textContent = 'ServiceNow ' + res.event.incident_number + (firstLine ? ' — ' + firstLine : '');
-        eventBox.hidden = false;
-      } else if (res.event_error) {
-        eventBox.textContent = 'ServiceNow step failed (state change still applied): ' + res.event_error;
-        eventBox.hidden = false;
-      } else if (res.event && res.event.resolution_text) {
-        eventBox.textContent = res.event.resolution_text.split('\\n')[0];
-        eventBox.hidden = false;
-      } else {
-        eventBox.hidden = true;
-      }
-    }
-
-    document.querySelectorAll('.dc-break, .dc-fix').forEach(function (btn) {
+    // Break-only, on purpose: fixing a scenario back to healthy is a human's job, done by
+    // reporting the symptom through the chat with human-in-the-loop off (see
+    // attempt_auto_remediation() in auto_remediation.py) - this tray never fixes anything
+    // itself, it only breaks things for the demo.
+    document.querySelectorAll('.dc-break').forEach(function (btn) {
       btn.addEventListener('click', function () {
-        var url = btn.classList.contains('dc-break') ? '/api/demo/break' : '/api/demo/fix';
         btn.disabled = true;
-        fetch(url, {
+        fetch('/api/demo/break', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ issue_id: btn.getAttribute('data-issue') }),
-        }).then(function (r) { return r.json(); }).then(function (res) {
-          showEvent(res);
-          refreshState();
-          btn.disabled = false;
-          // a refusal (e.g. "Fix" with no incident open yet) changed nothing, so there's
-          // nothing new to see on reload - leave the message on screen instead of wiping
-          // it out a second and a half later
-          if (res.ok !== false) {
-            setTimeout(function () { location.reload(); }, 1600);
-          }
+        }).then(function () {
+          setTimeout(function () { location.reload(); }, 600);
         });
       });
     });

@@ -63,21 +63,17 @@ LOGIN_BACKEND_URL_BROKEN = ""  # blanked out, as if someone wiped the config val
 # the one account the demo login page actually checks submitted credentials against
 DEMO_USERS = {"demo_user": "Summer#2026"}
 
-# healthy defaults for the 3 flags this file persists to disk, plus an empty open_incidents
-# map. Upload-folder permission is NOT one of these - it's real filesystem state, not a
-# flag, so get_state() reads it live from disk instead of trusting a value that could drift
-# out of sync with reality.
+# healthy defaults for the 3 flags this file persists to disk. Upload-folder permission is
+# NOT one of these - it's real filesystem state, not a flag, so get_state() reads it live
+# from disk instead of trusting a value that could drift out of sync with reality.
+#
+# Deliberately has no notion of a ServiceNow incident anywhere in this module - this file
+# only ever tracks the demo app's own state. Incidents are created and resolved exclusively
+# through the chat's attempt_auto_remediation() (see auto_remediation.py), never from here.
 DEFAULT_STATE = {
     "app_down": False,
     "login_ui_enabled": True,
     "login_cred_backend_ok": True,
-    # issue_id -> {"sys_id": ..., "number": ...} for whichever scenarios currently have a
-    # REAL ServiceNow incident open against them (see record_open_incident() below) - this
-    # is what lets app.py's /api/demo/fix resolve the SAME incident /api/demo/break raised,
-    # instead of losing track of it or creating a second one. Only ever populated when
-    # running through app.py's real routes (which have ServiceNow credentials) - stays
-    # empty forever in week3.standalone_app, which never touches ServiceNow.
-    "open_incidents": {},
 }
 
 # same 4 issue_ids auto_remediation.py's CATALOG uses - kept as one tuple so break_issue()
@@ -164,25 +160,6 @@ def break_issue(issue_id):
         state["login_cred_backend_ok"] = False
     _save(state)
     return get_state()
-
-
-def record_open_incident(issue_id, sys_id, number):
-    """Called by app.py's /api/demo/break right after it raises a real ServiceNow incident
-    for issue_id, so /api/demo/fix later knows exactly which incident to resolve."""
-    state = _load()
-    state.setdefault("open_incidents", {})[issue_id] = {"sys_id": sys_id, "number": number}
-    _save(state)
-
-
-def pop_open_incident(issue_id):
-    """Returns and clears the tracked incident for issue_id, or None if there isn't one
-    (e.g. this scenario was broken locally via demo_toggle.py, which never talks to
-    ServiceNow, or it's already been resolved). Called by app.py's /api/demo/fix."""
-    state = _load()
-    open_incidents = state.setdefault("open_incidents", {})
-    entry = open_incidents.pop(issue_id, None)
-    _save(state)
-    return entry
 
 
 def login_backend_url():

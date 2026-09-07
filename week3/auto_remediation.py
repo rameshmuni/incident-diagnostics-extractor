@@ -118,11 +118,10 @@ def match_auto_fix(incident_text):
 
 
 def _create_incident(new_incident_text):
-    # opens the ticket, unresolved (state defaults to New) - split out from the old
-    # _create_and_resolve_incident() so the event-driven path below (raise_event_incident())
-    # can create it separately from when it gets fixed, instead of both happening in the
-    # same instant. attempt_auto_remediation() still calls this immediately followed by
-    # _resolve_incident() below, so its own behavior is unchanged.
+    # opens the ticket, unresolved (state defaults to New) - kept separate from
+    # _resolve_incident() below purely so each step is easy to read on its own.
+    # attempt_auto_remediation() calls this immediately followed by _resolve_incident(),
+    # so in practice the two always happen back to back, in the same request.
     caller_sys_id = get_caller_sys_id()
     payload = {
         "short_description": new_incident_text[:160],
@@ -187,48 +186,3 @@ def attempt_auto_remediation(new_incident_text):
     }
 
 
-def _catalog_entry(issue_id):
-    entry = next((e for e in CATALOG if e["issue_id"] == issue_id), None)
-    if entry is None:
-        raise ValueError(f"unknown issue_id {issue_id!r} - expected one of {[e['issue_id'] for e in CATALOG]}")
-    return entry
-
-
-def raise_event_incident(issue_id):
-    """
-    The actual "webhook simulating a system alert" from the Week 3 assignment. Called by
-    app.py's /api/demo/break right after a known scenario is broken - this is the moment a
-    real monitoring system would have noticed the fault and opened a ticket, so this opens a
-    REAL ServiceNow incident describing the symptom (state: New), genuinely alerted rather
-    than typed by a human. Deliberately does NOT run the remedy yet - the demo app stays
-    visibly broken (and the incident stays open) until resolve_event_incident() below is
-    called separately, the same way a real alert doesn't fix itself the instant it fires.
-
-    No embedding/matching step is needed here (unlike attempt_auto_remediation) because the
-    caller already knows exactly which known issue this is - it's the one that was just
-    broken - so this always uses the catalog's own short_description as the incident text.
-    """
-    entry = _catalog_entry(issue_id)
-    incident = _create_incident(entry["short_description"])
-    return {"incident_number": incident["number"], "incident_sys_id": incident["sys_id"]}
-
-
-def resolve_event_incident(issue_id, sys_id=None):
-    """
-    The other half of the event-driven loop: runs the known remedy for issue_id (fixing the
-    demo app for real) and resolves the exact incident raise_event_incident() opened for it -
-    same incident, not a new one - with the remedy's Root Cause + Resolution write-up. This
-    is what app.py's /api/demo/fix calls.
-
-    sys_id is optional: if this scenario was broken some other way than through
-    /api/demo/break (e.g. locally via demo_toggle.py, which never talks to ServiceNow at
-    all), there's no tracked incident to resolve - the remedy still runs and fixes the app
-    for real, it just has nothing to PATCH in ServiceNow.
-    """
-    entry = _catalog_entry(issue_id)
-    resolution_text = entry["remedy"](entry["short_description"])
-    incident_number = None
-    if sys_id:
-        incident = _resolve_incident(sys_id, resolution_text)
-        incident_number = incident["number"]
-    return {"resolution_text": resolution_text, "incident_number": incident_number}
