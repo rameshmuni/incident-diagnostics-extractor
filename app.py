@@ -13,6 +13,9 @@ from query_incident import (
     search,
 )
 from query_incident_gemini import GEMINI_MODEL, call_gemini
+from week3.auto_remediation import attempt_auto_remediation, raise_event_incident, resolve_event_incident
+from week3.demo_app import demo_bp
+from week3 import mock_systems
 
 # serves static/index.html at "/" and everything else in static/ at its own path -
 # this app is just a thin HTTP wrapper around the exact same retrieval/logging functions
@@ -23,10 +26,19 @@ from query_incident_gemini import GEMINI_MODEL, call_gemini
 # query_incident_qwen.py stays around as the local/office-laptop-only path, not used here.
 app = Flask(__name__, static_folder="static", static_url_path="")
 
+# Week 3's real demo app (login + upload pages) lives under /demo, in this exact same
+# process/container - see demo_app.py's module docstring for why that has to be true.
+app.register_blueprint(demo_bp)
+
+# make sure the real uploads/ folder exists (healthy, writable) before anything can touch
+# it - the Dockerfile already creates it this way in the deployed container, this is only
+# needed for local runs where that build step never happened
+mock_systems.ensure_upload_dir()
+
 
 @app.route("/")
 def home():
-    return send_from_directory(app.static_folder, "static/index.html")
+    return send_from_directory(app.static_folder, "index.html")
 
 
 @app.route("/api/status")
@@ -57,6 +69,19 @@ def api_query():
         if not text:
             return jsonify({"error": "Incident text is required"}), 400
 
+        # Week 3's toggle. Default True (missing/omitted = today's Week 2 behavior, so any
+        # older client that doesn't send this field at all keeps working unchanged) - only an
+        # explicit `false` skips the human verdict step and lets the bot act on its own.
+        human_in_loop = data.get("human_in_loop", True)
+
+        if not human_in_loop:
+            # No retrieval-and-suggest step at all on this path - attempt_auto_remediation()
+            # either runs a known remedy and resolves the incident, or escalates a new one.
+            # Either way it's already final by the time it returns; there's nothing for a
+            # human to confirm, so /api/verdict is never called for this response.
+            result = attempt_auto_remediation(text)
+            return jsonify({"mode": "auto", **result})
+
         query_vector = embed_query(text)
         matches = search(query_vector)
 
@@ -64,7 +89,7 @@ def api_query():
         suggestion = call_gemini(prompt)
         slm_pick = parse_slm_pick(suggestion, matches)
 
-        return jsonify({"matches": matches, "suggestion": suggestion, "slm_pick": slm_pick})
+        return jsonify({"mode": "review", "matches": matches, "suggestion": suggestion, "slm_pick": slm_pick})
     except Exception as exc:  # noqa: BLE001 - surfacing the real error to the UI is the point
         return jsonify({"error": str(exc)}), 500
 
@@ -115,6 +140,78 @@ def api_verdict():
         )
     except Exception as exc:  # noqa: BLE001 - surfacing the real error to the UI is the point
         return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/demo/state")
+def demo_state():
+    # read-only view of the mock systems' current state - lets the UI (or you, via curl)
+    # confirm what's actually broken before running a query, without guessing
+    return jsonify(mock_systems.get_state())
+
+
+@app.route("/api/demo/break", methods=["POST"])
+def demo_break():
+    # Cloud Run's local disk isn't shared with Cloud Shell or anywhere else - this has to be
+    # an API call against the *running service* itself, not a CLI script run somewhere else,
+    # or "break" and "fix" would end up touching two different filesystems entirely. Calling
+    # mock_systems.break_issue() here is what keeps the demo's before/after state consistent.
+    try:
+        data = request.get_json(force=True)
+        issue_id = data.get("issue_id")
+        state = mock_systems.break_issue(issue_id)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"ok": False, "error": str(exc)}), 400
+
+    # this is the actual "webhook simulating a system alert" from the Week 3 assignment:
+    # breaking a known scenario is treated as the moment a real monitor would have noticed
+    # the fault and opened a ticket, so a REAL ServiceNow incident gets raised right here -
+    # deliberately best-effort (wrapped separately from the state break above) so a
+    # ServiceNow hiccup never blocks the demo app from visibly breaking, which has to stay
+    # reliable regardless of ServiceNow's own availability.
+    event, event_error = None, None
+    try:
+        event = raise_event_incident(issue_id)
+        mock_systems.record_open_incident(issue_id, event["incident_sys_id"], event["incident_number"])
+    except Exception as exc:  # noqa: BLE001
+        event_error = str(exc)
+
+    return jsonify({"ok": True, "state": mock_systems.get_state(), "event": event, "event_error": event_error})
+
+
+@app.route("/api/demo/fix", methods=["POST"])
+def demo_fix():
+    # the other half of the loop: runs the real remedy for issue_id and resolves the exact
+    # ServiceNow incident /api/demo/break raised for it (tracked via mock_systems'
+    # open_incidents) - same incident, not a new one.
+    #
+    # Deliberately refuses to run at all if there's no open incident on record: the whole
+    # point of "event-driven" is that the remedy is a response to a real alert, not a
+    # free-standing button, so on the real deployed app the fix genuinely cannot begin
+    # before an incident exists. (This is what makes /api/demo/break's ServiceNow step
+    # best-effort rather than required above - if it ever fails, this refusal is what
+    # actually enforces the "no incident, no fix" rule, not just wishful sequencing.)
+    try:
+        data = request.get_json(force=True)
+        issue_id = data.get("issue_id")
+        open_incident = mock_systems.pop_open_incident(issue_id)
+        if open_incident is None:
+            return jsonify({
+                "ok": False,
+                "error": (
+                    "No open ServiceNow incident for this issue - the remedy only runs in "
+                    "response to a real incident. Break it first (which raises the alert), "
+                    "then Fix."
+                ),
+            }), 400
+        result = resolve_event_incident(issue_id, open_incident["sys_id"])
+        return jsonify({"ok": True, "state": mock_systems.get_state(), "event": result})
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"ok": False, "error": str(exc)}), 400
+
+
+@app.route("/api/demo/reset", methods=["POST"])
+def demo_reset():
+    return jsonify({"ok": True, "state": mock_systems.reset_all()})
 
 
 if __name__ == "__main__":

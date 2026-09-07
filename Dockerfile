@@ -20,6 +20,21 @@ RUN pip install --no-cache-dir -r requirements.txt
 # (.dockerignore keeps out the stuff that shouldn't be in the image - see that file)
 COPY . .
 
+# Week 3's upload-permission demo scenario needs a REAL chmod to actually deny a write.
+# On Linux, root ignores normal file-permission (DAC) checks entirely - so if this
+# container ran as root (the Dockerfile default), a chmod 000 on the uploads folder
+# would do nothing and the "broken" demo would keep working, silently faking the fault.
+# Creating a dedicated non-root user and switching to it below is what makes that
+# scenario a genuine fault instead of a fake one. mkdir the uploads folder (kept inside
+# week3/ - see that package's mock_systems.py - so every Week 3 runtime artifact stays
+# out of the shared scripts/ folder) and hand it, and everything else under /app, to
+# that user before the switch, since root is the only one allowed to chown.
+RUN useradd --create-home --uid 1001 --shell /usr/sbin/nologin appuser \
+    && mkdir -p /app/week3/uploads \
+    && chown -R appuser:appuser /app
+
+USER appuser
+
 # Cloud Run sets PORT itself at runtime (usually 8080) and expects the container to
 # listen on 0.0.0.0:$PORT - gunicorn's $PORT below reads that same env var
 ENV PORT=8080

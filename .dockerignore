@@ -26,4 +26,16 @@ resolved_incidents_corpus.json
 incident_index.faiss
 incident_index_metadata.json
 
+# Week 3's mock system state - starts from DEFAULT_STATE automatically (see
+# week3/mock_systems.py) whenever it's missing, so a locally-generated copy with stale
+# broken/fixed state from testing should never get baked into the image. Both live inside
+# week3/ on purpose, isolated from Week 2's files - see that package's docstring.
+week3/mock_systems_state.json
+
+# Week 3's real upload-permission demo folder - the Dockerfile creates this fresh
+# (owned by the non-root appuser, default permissions) at build time, so any local
+# copy from testing - possibly containing test files or a chmod 000 left over from
+# a "break" - should never get baked into the image instead of that clean one
+week3/uploads/
+
 .git/

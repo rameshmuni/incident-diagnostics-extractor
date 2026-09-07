@@ -113,6 +113,7 @@
     background: #e4e9ed; padding: 5px 12px; border-radius: 999px;
   }
 
+  .typing-label { font-size: 12px; color: var(--text-mid); margin-bottom: 4px; }
   .typing { display: flex; gap: 4px; padding: 4px 0; }
   .typing span {
     width: 6px; height: 6px; border-radius: 50%; background: #b6c0c7;
@@ -172,7 +173,29 @@
   .result-card.confirmed { background: #eafaf3; border: 1px solid #b7ecd3; color: #0b6b3f; }
   .result-card.corrected { background: #eaf3ff; border: 1px solid #bcd8ff; color: #144b8f; }
   .result-card.escalated { background: #fff4e5; border: 1px solid #ffd9a1; color: #8a4b0a; }
+  .result-card.auto-resolved { background: #e9fbf9; border: 1px solid #9fe6dd; color: #0b5c54; }
   .result-icon { font-size: 16px; }
+  .result-meta { font-size: 11.5px; opacity: .75; margin-top: 4px; display: block; }
+
+  /* ---------- human-in-the-loop toggle ---------- */
+  #hil-row {
+    width: 100%; max-width: 760px; margin: 0 auto 10px; display: flex;
+    align-items: center; gap: 10px; padding: 0 4px;
+  }
+  .switch { position: relative; display: inline-block; width: 38px; height: 22px; flex-shrink: 0; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch .slider {
+    position: absolute; cursor: pointer; inset: 0; background: #c4d4d1;
+    border-radius: 999px; transition: background .15s;
+  }
+  .switch .slider::before {
+    content: ""; position: absolute; width: 16px; height: 16px; left: 3px; bottom: 3px;
+    background: white; border-radius: 50%; transition: transform .15s;
+  }
+  .switch input:checked + .slider { background: var(--teal); }
+  .switch input:checked + .slider::before { transform: translateX(16px); }
+  #hil-label { font-size: 12px; color: var(--text-mid); }
+  #hil-label strong { color: var(--text-dark); }
 
   /* ---------- input bar ---------- */
   #inputbar {
@@ -224,12 +247,19 @@
     </div>
 
     <div id="inputbar">
+      <div id="hil-row">
+        <label class="switch">
+          <input type="checkbox" id="hil-checkbox" checked>
+          <span class="slider"></span>
+        </label>
+        <span id="hil-label">Human-in-the-loop: <strong id="hil-state">On</strong></span>
+      </div>
       <div id="inputwrap">
         <textarea id="incident-text" rows="1" placeholder="Describe the new incident…"></textarea>
         <button id="send-btn" onclick="sendIncident()">&#10148;</button>
       </div>
     </div>
-    <div id="hint">Retrieval: FAISS over resolved ServiceNow incidents &nbsp;·&nbsp; Reasoning: local SLM (Ollama) &nbsp;·&nbsp; Every answer is confirmed by a human before it's final</div>
+    <div id="hint">Retrieval: Gemini embeddings + BigQuery VECTOR_SEARCH &nbsp;·&nbsp; Reasoning: Gemini &nbsp;·&nbsp; <span id="hint-hil-note">Every suggestion is confirmed by a human before it's final</span></div>
   </div>
 </div>
 
@@ -237,7 +267,19 @@
 const thread = document.getElementById('thread');
 const textEl = document.getElementById('incident-text');
 const sendBtn = document.getElementById('send-btn');
+const hilCheckbox = document.getElementById('hil-checkbox');
+const hilStateEl = document.getElementById('hil-state');
+const hintHilNote = document.getElementById('hint-hil-note');
 let awaitingVerdict = false;
+
+function updateHilCopy() {
+  const on = hilCheckbox.checked;
+  hilStateEl.textContent = on ? 'On' : 'Off';
+  hintHilNote.textContent = on
+    ? "Every suggestion is confirmed by a human before it's final"
+    : 'Known issues are fixed automatically — no confirmation step';
+}
+hilCheckbox.addEventListener('change', updateHilCopy);
 
 function el(tag, cls, html) {
   const e = document.createElement(tag);
@@ -306,11 +348,12 @@ function matchCardHtml(m, selectable) {
   `;
 }
 
-function addTyping() {
+function addTyping(statusText) {
   const row = el('div', 'row bot-row');
   row.appendChild(el('div', 'avatar', '&#129302;'));
   const bubble = el('div', 'bubble typing-bubble');
-  bubble.innerHTML = '<div class="typing"><span></span><span></span><span></span></div>';
+  const label = statusText ? `<div class="typing-label">${escapeHtml(statusText)}</div>` : '';
+  bubble.innerHTML = `${label}<div class="typing"><span></span><span></span><span></span></div>`;
   row.appendChild(bubble);
   row.id = 'typing-row';
   thread.appendChild(row);
@@ -330,14 +373,15 @@ async function sendIncident() {
   textEl.value = '';
   autoGrow();
   setInputEnabled(false);
-  addTyping();
+  const humanInLoop = hilCheckbox.checked;
+  addTyping(humanInLoop ? null : 'Diagnosing incident and triggering remedy if matched…');
 
   let data;
   try {
     const resp = await fetch('/api/query', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, human_in_loop: humanInLoop }),
     });
     data = await resp.json();
     if (!resp.ok) throw new Error(data.error || 'Request failed');
@@ -353,6 +397,11 @@ async function sendIncident() {
 }
 
 function renderAssistantTurn(text, data) {
+  if (data.mode === 'auto') {
+    renderAutoOutcome(data);
+    return;
+  }
+
   const row = el('div', 'row bot-row');
   row.appendChild(el('div', 'avatar', '&#129302;'));
   const bubble = el('div', 'bubble');
@@ -388,6 +437,46 @@ function renderAssistantTurn(text, data) {
     actions.remove();
     showCorrectionChoices(text, data, bubble);
   };
+}
+
+function renderAutoOutcome(data) {
+  // human-in-the-loop was off: attempt_auto_remediation() already ran to completion on the
+  // backend (either the issue was fixed and the incident resolved, or it was escalated) -
+  // there's nothing pending here, so no match cards and no confirm/correct buttons at all.
+  const row = el('div', 'row bot-row');
+  row.appendChild(el('div', 'avatar', '&#129302;'));
+  const bubble = el('div', 'bubble');
+
+  let card;
+  if (data.outcome === 'auto_resolved') {
+    const resolution = escapeHtml(data.resolution_text || '').replace(/\n/g, '<br>');
+    card = el('div', 'result-card auto-resolved', `
+      <span class="result-icon">🤖</span>
+      <span>
+        Recognized this as a known issue (<strong>${escapeHtml(data.issue_id)}</strong>, similarity ${data.similarity}) — triggering the remedy script now,
+        no human review needed.<br><br>
+        Logged as <strong>${escapeHtml(data.incident_number || '(number unavailable)')}</strong> in ServiceNow, already resolved:<br><br>
+        ${resolution}
+        <span class="result-meta">Auto-resolved · human-in-the-loop was off for this request</span>
+      </span>
+    `);
+  } else {
+    const num = data.incident_number || '(number unavailable)';
+    card = el('div', 'result-card escalated', `
+      <span class="result-icon">🚨</span>
+      <span>
+        This didn't confidently match any of the issues I know how to fix automatically (best similarity ${data.best_similarity}), so I opened
+        <strong>${escapeHtml(num)}</strong> in ServiceNow (state: New) for a developer instead of guessing.
+        <span class="result-meta">Escalated · human-in-the-loop was off for this request</span>
+      </span>
+    `);
+  }
+  bubble.appendChild(card);
+  row.appendChild(bubble);
+  thread.appendChild(row);
+  scrollDown();
+
+  setInputEnabled(true);
 }
 
 function showCorrectionChoices(text, data, bubble) {

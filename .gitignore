@@ -10,3 +10,5 @@ feedback_log.jsonl
 escalated_to_developer.jsonl
 .idea/
 .DS_Store
+week3/mock_systems_state.json
+week3/uploads/
