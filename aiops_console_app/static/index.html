@@ -229,7 +229,7 @@ async function pollRefreshStatus() {
   if (data.status === 'running') {
     corpusBanner.hidden = false;
     corpusBanner.className = 'running';
-    corpusBanner.innerHTML = '<span class="spin"></span> Refreshing the search corpus so this fix\'s resolution becomes retrievable (re-embeds every resolved incident - can take a minute or two)…';
+    corpusBanner.innerHTML = '<span class="spin"></span> Refreshing the search corpus so this fix\'s resolution becomes retrievable (only newly-resolved incidents get embedded, so this is usually quick - a full first-time build can take a minute or two)…';
     corpusBtn.disabled = true;
     corpusBtn.textContent = 'Refreshing…';
     refreshPollTimer = setTimeout(pollRefreshStatus, 3000);

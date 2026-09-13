@@ -66,8 +66,11 @@ _refresh_state = {
 
 def _run_corpus_refresh():
     # Runs on a background thread so approving a fix returns to the browser
-    # immediately - refresh_corpus() re-embeds the whole resolved-incident
-    # corpus (see its docstring) and can easily take a minute or more.
+    # immediately. refresh_corpus() only embeds incidents it hasn't seen
+    # before now (see its docstring), so most runs are quick - but it's
+    # still backgrounded on purpose: the very first refresh ever against a
+    # project (nothing embedded yet) still has to embed everything, and
+    # that one run can take a while.
     with _refresh_lock:
         _refresh_state.update(status="running", started_at=time.time(), finished_at=None, error=None)
     try:
@@ -151,9 +154,10 @@ def confirm_candidate():
         # BigQuery corpus Week 2's retrieval reads from doesn't know that
         # yet (see aiops_sdk/retrieval.py's refresh_corpus() docstring for
         # why this project never kept those two in sync automatically
-        # before now). Kick off a rebuild in the background rather than
-        # blocking this response on it - refresh_corpus() can take a
-        # minute or more.
+        # before now). Kick off a refresh in the background rather than
+        # blocking this response on it - it only embeds the incident(s) it
+        # hasn't seen before, so it's normally quick, but backgrounding it
+        # costs nothing and protects against the rare slow run.
         corpus_refresh = _start_corpus_refresh()
         return jsonify({"ok": True, "corpus_refresh": corpus_refresh, **outcome})
     except Exception as exc:  # noqa: BLE001

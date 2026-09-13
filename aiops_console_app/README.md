@@ -65,13 +65,16 @@ until someone remembered to do that by hand - easy to miss, and confusing
 in a demo where the count just... doesn't move.
 
 Now, right after `/api/candidates/confirm` resolves an incident, this app
-kicks off `sdk.search.refresh_corpus()` (wraps that same pair of scripts -
-see `aiops_sdk/README.md`) on a background thread, so approving a fix
-doesn't sit there waiting on it. It's backgrounded because it isn't fast:
-`build_bigquery_corpus.py` re-embeds *every* resolved incident on each run
-(a full rebuild, not an incremental append - that's how that script already
-worked, unchanged here), so this can take a minute or more once there are
-a few dozen resolved incidents.
+kicks off `sdk.search.refresh_corpus()` (see `aiops_sdk/README.md`) on a
+background thread, so approving a fix doesn't sit there waiting on it.
+`refresh_corpus()` only embeds incidents it hasn't seen before - it reads
+which ones are already in the BigQuery table first, and skips those
+entirely - so most refreshes finish in a few seconds, just long enough for
+one paced Gemini call per newly-resolved incident. It's still backgrounded
+on principle rather than run inline: the very first refresh ever against a
+project has nothing to diff against yet, so that one run does embed the
+whole existing backlog and can take a minute or more - after that, only
+genuinely new incidents cost anything.
 
 A banner at the top of this page polls `GET /api/refresh_status` and shows
 what's happening - "refreshing" while it runs, then the new count once it's

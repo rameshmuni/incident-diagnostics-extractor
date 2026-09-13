@@ -95,7 +95,31 @@ def main():
 
     check("IncidentSearch.find_similar() delegates embed()+search() to query_incident.py", _find_similar_delegates)
 
-    def _refresh_corpus_includes_resolved_and_closed_incidents():
+    def _fake_bq_client_for_refresh(existing_sys_ids, corpus_count_after):
+        # Shared fake for both refresh_corpus() tests below: a client whose
+        # query() distinguishes the "which sys_ids are already embedded"
+        # SELECT from corpus_size()'s own COUNT(*) SELECT, and whose
+        # create_dataset/load_table_from_json are plain MagicMocks so real
+        # (unmocked) bigquery.LoadJobConfig/DatasetReference objects can
+        # still be constructed and passed to them without needing real
+        # credentials.
+        mock_client = MagicMock()
+        mock_client.project = "fake-project"
+
+        def fake_query(sql, *a, **kw):
+            result = MagicMock()
+            if "SELECT sys_id" in sql:
+                result.result.return_value = [{"sys_id": sid} for sid in existing_sys_ids]
+            elif "COUNT(*)" in sql:
+                result.result.return_value = [{"n": corpus_count_after}]
+            else:
+                result.result.return_value = []
+            return result
+
+        mock_client.query.side_effect = fake_query
+        return mock_client
+
+    def _refresh_corpus_embeds_and_appends_only_new_resolved_and_closed_incidents():
         # Regression test for the corpus count dropping unexpectedly after
         # refresh_corpus() started actually being called (14 instead of the
         # ~52 originally seeded). fetch_resolved_incidents.py's own query
@@ -107,8 +131,12 @@ def main():
         # refresh_corpus() must ask for stateIN6,7 instead, so a Closed
         # incident's close_notes stay part of the corpus rather than
         # quietly disappearing from it.
-        import json
-        from pathlib import Path
+        #
+        # Also the actual fix for "why does approving one fix cost
+        # re-embedding the whole corpus": both incidents below are brand new
+        # (no existing sys_id in the table yet), so both must be embedded
+        # exactly once each and appended - never used to replace the table.
+        from google.cloud import bigquery as _bq
 
         incidents = [
             {"sys_id": "s1", "number": "INC1", "short_description": "Login broken", "category": "Software",
@@ -116,40 +144,80 @@ def main():
             {"sys_id": "s2", "number": "INC2", "short_description": "Upload broken", "category": "Software",
              "priority": "3", "close_notes": "Root Cause:\nx\n\nResolution:\ny", "state": "7"},
         ]
-        corpus_path = Path("resolved_incidents_corpus.json")
-        try:
-            with patch("requests.get") as mock_get, \
-                 patch("build_bigquery_corpus.main") as mock_build, \
-                 patch("query_incident.corpus_size", return_value=2) as mock_size:
-                fake_resp = MagicMock()
-                fake_resp.raise_for_status.return_value = None
-                fake_resp.json.return_value = {"result": incidents}
-                mock_get.return_value = fake_resp
+        with patch("requests.get") as mock_get, \
+             patch("query_incident.get_bq_client") as mock_bq, \
+             patch("query_incident.embed_text", return_value=[0.1, 0.2, 0.3]) as mock_embed, \
+             patch("time.sleep"):
+            fake_resp = MagicMock()
+            fake_resp.raise_for_status.return_value = None
+            fake_resp.json.return_value = {"result": incidents}
+            mock_get.return_value = fake_resp
 
-                sdk = AiopsSDK()
-                size = sdk.search.refresh_corpus()
+            mock_client = _fake_bq_client_for_refresh(existing_sys_ids=[], corpus_count_after=2)
+            mock_bq.return_value = mock_client
 
-                called_query = mock_get.call_args.kwargs["params"]["sysparm_query"]
-                assert "stateIN6,7" in called_query, (
-                    "refresh_corpus() must query stateIN6,7 (Resolved OR Closed), "
-                    "not just Resolved - otherwise incidents that have aged into "
-                    "Closed silently drop out of the corpus"
-                )
-                assert mock_build.called, "must still hand off to build_bigquery_corpus.py's own embed+load step, unmodified"
-                assert mock_size.called
-                assert size == 2
+            sdk = AiopsSDK()
+            size = sdk.search.refresh_corpus()
 
-            written = json.loads(corpus_path.read_text())
-            assert {r["incident_id"] for r in written} == {"INC1", "INC2"}, (
-                "both the Resolved and the Closed incident must make it into the corpus file"
+            called_query = mock_get.call_args.kwargs["params"]["sysparm_query"]
+            assert "stateIN6,7" in called_query, (
+                "refresh_corpus() must query stateIN6,7 (Resolved OR Closed), "
+                "not just Resolved - otherwise incidents that have aged into "
+                "Closed silently drop out of the corpus"
             )
-        finally:
-            if corpus_path.exists():
-                corpus_path.unlink()
+            assert mock_embed.call_count == 2, "both brand-new incidents must be embedded exactly once each"
+            assert mock_client.load_table_from_json.called
+            loaded_records = mock_client.load_table_from_json.call_args.args[0]
+            assert {r["incident_id"] for r in loaded_records} == {"INC1", "INC2"}, (
+                "both the Resolved and the Closed incident must make it into the loaded batch"
+            )
+            job_config = mock_client.load_table_from_json.call_args.kwargs["job_config"]
+            assert job_config.write_disposition == _bq.WriteDisposition.WRITE_APPEND, (
+                "must append just the new rows - never WRITE_TRUNCATE the whole table"
+            )
+            assert size == 2
 
     check(
-        "IncidentSearch.refresh_corpus() includes Closed incidents, not just Resolved, so the corpus can't shrink as incidents age",
-        _refresh_corpus_includes_resolved_and_closed_incidents,
+        "IncidentSearch.refresh_corpus() includes Closed incidents (not just Resolved) and embeds+appends only newly-seen ones",
+        _refresh_corpus_embeds_and_appends_only_new_resolved_and_closed_incidents,
+    )
+
+    def _refresh_corpus_skips_already_embedded_incidents():
+        # The direct fix for "why does approving a fix in the console cost
+        # 5 minutes re-embedding the whole corpus every time" - once an
+        # incident's sys_id is already sitting in the BigQuery table,
+        # refresh_corpus() must recognize that and skip it entirely: no
+        # embedding call, no BigQuery write, not just "don't duplicate the
+        # row."
+        incidents = [
+            {"sys_id": "s1", "number": "INC1", "short_description": "Login broken", "category": "Software",
+             "priority": "3", "close_notes": "Root Cause:\nx\n\nResolution:\ny", "state": "6"},
+            {"sys_id": "s2", "number": "INC2", "short_description": "Upload broken", "category": "Software",
+             "priority": "3", "close_notes": "Root Cause:\nx\n\nResolution:\ny", "state": "7"},
+        ]
+        with patch("requests.get") as mock_get, \
+             patch("query_incident.get_bq_client") as mock_bq, \
+             patch("query_incident.embed_text") as mock_embed, \
+             patch("time.sleep"):
+            fake_resp = MagicMock()
+            fake_resp.raise_for_status.return_value = None
+            fake_resp.json.return_value = {"result": incidents}
+            mock_get.return_value = fake_resp
+
+            # both sys_ids already known - simulates a refresh with nothing new
+            mock_client = _fake_bq_client_for_refresh(existing_sys_ids=["s1", "s2"], corpus_count_after=2)
+            mock_bq.return_value = mock_client
+
+            sdk = AiopsSDK()
+            size = sdk.search.refresh_corpus()
+
+            assert not mock_embed.called, "already-embedded incidents must never be re-embedded"
+            assert not mock_client.load_table_from_json.called, "nothing new to load - must not touch the table at all"
+            assert size == 2
+
+    check(
+        "IncidentSearch.refresh_corpus() skips incidents already in the corpus - zero embedding calls when nothing is new",
+        _refresh_corpus_skips_already_embedded_incidents,
     )
 
     def _suggest_composes_search_and_llm():

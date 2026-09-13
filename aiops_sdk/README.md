@@ -131,23 +131,49 @@ new_count = sdk.search.refresh_corpus()  # chains both scripts, returns the new 
 
 `aiops_console_app` calls this automatically, in a background thread, right
 after every approved fix - see that app's README for why it's backgrounded
-rather than inline. Nothing about `fetch_resolved_incidents.py` or
-`build_bigquery_corpus.py` was changed to add this - `refresh_corpus()`
-reuses `to_corpus_records()` and `main()` from those two files unmodified,
-and only replaces the ServiceNow query that decides which incidents are "in
-scope."
+rather than inline.
 
-That one difference matters: `fetch_resolved_incidents.py`'s own query only
-asks for `state=6` (Resolved). This project already learned, while fixing
-the "resolved candidates keep reappearing" bug, that on this instance
-`active` only goes false once an incident reaches Closed (state 7) -
-Resolved alone doesn't do it. That's a strong sign incidents here really do
-age from Resolved into Closed on their own over time - and once one does,
-a `state=6`-only query stops seeing it, even though its close_notes are
-just as valid a past RCA as they ever were. `refresh_corpus()` asks for
-`stateIN6,7` instead, specifically so the corpus (and the count in
-`aiops_sdk_demo_app`'s status pill) can only grow as things get fixed, never
-quietly shrink because older resolved incidents finished their lifecycle.
+`fetch_resolved_incidents.py`'s own query only asks for `state=6`
+(Resolved). This project already learned, while fixing the "resolved
+candidates keep reappearing" bug, that on this instance `active` only goes
+false once an incident reaches Closed (state 7) - Resolved alone doesn't do
+it. That's a strong sign incidents here really do age from Resolved into
+Closed on their own over time - and once one does, a `state=6`-only query
+stops seeing it, even though its close_notes are just as valid a past RCA
+as they ever were. `refresh_corpus()` asks for `stateIN6,7` instead,
+specifically so the corpus (and the count in `aiops_sdk_demo_app`'s status
+pill) can only grow as things get fixed, never quietly shrink because older
+resolved incidents finished their lifecycle.
+
+**This is now an incremental top-up, not a full rebuild.** An earlier
+version of this method handed every incident it found straight to
+`build_bigquery_corpus.py`'s `main()`, which always does a full
+`WRITE_TRUNCATE` reload - re-fetch everything, re-embed everything, replace
+the whole table. That was correct but wasteful: re-embedding incidents that
+were already searchable, every single time, so a single approved fix cost
+minutes once there were a few dozen resolved incidents, and it only gets
+slower from here as the corpus grows. `refresh_corpus()` now:
+
+1. Reads which `sys_id`s are already in the BigQuery table (one plain
+   `SELECT`, no embedding calls).
+2. Fetches the same `stateIN6,7` incidents from ServiceNow as before, via
+   `fetch_resolved_incidents.py`'s own `to_corpus_records()` (imported, not
+   reimplemented).
+3. Skips anything already in the table - only genuinely new incidents get
+   embedded.
+4. Embeds just those (still one paced Gemini call per record, reusing
+   `build_bigquery_corpus.py`'s own pacing and schema constants, unmodified)
+   and `WRITE_APPEND`s just the new rows - existing rows are never re-read,
+   re-embedded, or rewritten.
+
+So a refresh with nothing new resolved returns almost immediately, and one
+with N newly-resolved incidents costs N embedding calls, not "everything
+so far, plus N." The very first refresh ever run against a project still
+embeds the whole existing backlog once (there's nothing to diff against
+yet) - after that, every later refresh only pays for what's actually new.
+One accepted tradeoff: if an already-embedded incident's close_notes were
+edited afterward, this won't notice or re-embed it - see the method's own
+docstring for why that hasn't mattered here in practice.
 
 Swapping the model later means writing a new `LLMProvider` subclass and
 passing it in - nothing else changes:
