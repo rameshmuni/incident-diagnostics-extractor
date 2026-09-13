@@ -70,8 +70,13 @@ for the other half of this story.
 | Which LLM answers | hardcoded to Gemini via `call_gemini` | still Gemini by default, but swappable |
 
 Because it reuses the real `week3.mock_systems` module (not a copy), this
-app and the original share the same on-disk demo state - breaking
-`app_down` from either app's demo tray shows up in both.
+app and the original share the same demo state - breaking `app_down` from
+either app's demo tray shows up in both. That state now lives in a small
+shared BigQuery table (falling back to a local file if BigQuery isn't
+reachable), specifically so it's also shared with `aiops_console_app` even
+though that's a separate Cloud Run service with its own disk - see
+`week3/mock_systems.py`'s module docstring for why a local file alone
+stopped being enough once this project ran as more than one process.
 
 ## The status pill updates itself now
 
