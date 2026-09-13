@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AIOps Console</title>
+<style>
+  :root {
+    --navy-900: #0f1c26;
+    --navy-800: #162835;
+    --navy-700: #1e3548;
+    --teal: #00b3a4;
+    --teal-dark: #009488;
+    --amber: #f79009;
+    --red: #d92d20;
+    --gray-bg: #eef1f4;
+    --card-bg: #ffffff;
+    --border: #dde3e8;
+    --text-dark: #1b2733;
+    --text-mid: #55636e;
+    --text-light: #8a97a1;
+    --mono: "SFMono-Regular", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; min-height: 100vh;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--gray-bg); color: var(--text-dark);
+  }
+
+  #topbar {
+    height: 56px; background: var(--navy-900); flex-shrink: 0;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 24px; border-bottom: 1px solid #0a141b;
+  }
+  #topbar .brand { display: flex; align-items: baseline; gap: 10px; }
+  #topbar .title { color: #f2f5f6; font-size: 15px; font-weight: 600; }
+  #topbar .subtitle { color: #7f929c; font-size: 12px; }
+  #refresh-btn, #refresh-corpus-btn {
+    font-size: 12.5px; color: #cfe4e2; background: transparent;
+    border: 1px solid #2a4356; padding: 6px 12px; border-radius: 6px; cursor: pointer;
+  }
+  #refresh-btn:hover, #refresh-corpus-btn:hover:not(:disabled) { background: var(--navy-700); }
+  #refresh-corpus-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  #main { max-width: 780px; margin: 0 auto; padding: 28px 20px 60px; }
+
+  #empty-state {
+    text-align: center; padding: 60px 20px; color: var(--text-mid);
+  }
+  #empty-state .big { font-size: 34px; margin-bottom: 10px; }
+
+  .candidate {
+    background: var(--card-bg); border: 1px solid var(--border); border-radius: 10px;
+    padding: 18px 20px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(20,30,40,.05);
+  }
+  .candidate.resolved { opacity: 0.45; pointer-events: none; }
+  .cand-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+  .cand-number { font-family: var(--mono); font-weight: 700; font-size: 13.5px; color: var(--navy-800); }
+  .badge {
+    font-size: 10.5px; font-weight: 600; padding: 2px 8px; border-radius: 999px;
+    text-transform: uppercase; letter-spacing: .02em; background: #fff4e5; color: #8a4b0a;
+  }
+  .cand-sim { font-size: 11.5px; color: var(--text-light); margin-left: auto; }
+
+  .cand-report {
+    font-size: 13.5px; color: var(--text-dark); line-height: 1.5; margin: 6px 0 12px;
+    padding: 10px 12px; background: #fbfcfd; border-left: 2px solid var(--border); border-radius: 4px;
+  }
+  .cand-report .label { display: block; font-size: 10.5px; text-transform: uppercase; letter-spacing: .03em;
+    color: var(--text-light); margin-bottom: 4px; }
+
+  .cand-remedy {
+    font-size: 13px; line-height: 1.5; color: #0b5c54; background: #e9fbf9;
+    border: 1px solid #9fe6dd; border-radius: 7px; padding: 10px 12px; margin-bottom: 14px;
+  }
+  .cand-remedy .label { display: block; font-size: 10.5px; text-transform: uppercase; letter-spacing: .03em;
+    color: #0b5c54; opacity: .8; margin-bottom: 4px; }
+
+  .cand-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .cand-actions input[type=text] {
+    flex: 1; min-width: 160px; padding: 8px 10px; border: 1px solid var(--border);
+    border-radius: 7px; font-size: 13px; background: #fbfcfd;
+  }
+  .btn {
+    font-size: 13px; font-weight: 600; padding: 8px 16px; border-radius: 7px;
+    cursor: pointer; border: 1px solid transparent; white-space: nowrap;
+  }
+  .btn-primary { background: var(--teal); color: white; }
+  .btn-primary:hover:not(:disabled) { background: var(--teal-dark); }
+  .btn-primary:disabled { background: #c4d4d1; cursor: not-allowed; }
+  .btn-outline { background: white; color: var(--text-mid); border-color: var(--border); }
+
+  .cand-result {
+    margin-top: 12px; font-size: 13px; line-height: 1.5; padding: 10px 12px;
+    border-radius: 7px; background: #eafaf3; border: 1px solid #b7ecd3; color: #0b6b3f;
+  }
+
+  #hint { text-align: center; font-size: 11.5px; color: var(--text-light); margin-top: 20px; }
+
+  #corpus-banner {
+    display: flex; align-items: center; gap: 8px; font-size: 12.5px;
+    padding: 9px 14px; border-radius: 7px; margin-bottom: 18px;
+  }
+  #corpus-banner.running { background: #fff4e5; color: #8a4b0a; border: 1px solid #fbdca6; }
+  #corpus-banner.done { background: #eafaf3; color: #0b6b3f; border: 1px solid #b7ecd3; }
+  #corpus-banner.error { background: #fdefee; color: #d92d20; border: 1px solid #f7c8c3; }
+  #corpus-banner .spin {
+    width: 11px; height: 11px; border-radius: 50%; flex-shrink: 0;
+    border: 2px solid rgba(0,0,0,.15); border-top-color: currentColor;
+    animation: corpus-spin .8s linear infinite;
+  }
+  @keyframes corpus-spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+  <div id="topbar">
+    <div class="brand">
+      <span class="title">AIOps Console</span>
+      <span class="subtitle">Incidents waiting for remedy approval</span>
+    </div>
+    <div style="display:flex; gap:8px;">
+      <button id="refresh-corpus-btn" onclick="triggerCorpusRefresh()">&#8635; Rebuild Search Corpus</button>
+      <button id="refresh-btn" onclick="loadCandidates()">&#8635; Refresh</button>
+    </div>
+  </div>
+
+  <div id="main">
+    <div id="corpus-banner" hidden></div>
+    <div id="list"></div>
+    <div id="empty-state" hidden>
+      <div class="big">&#10003;</div>
+      <div>No incidents waiting for review. Everything's caught up.</div>
+    </div>
+    <div id="hint">Every fix here runs only when someone on this page clicks Approve &amp; Run Fix. Nothing on this page runs automatically.</div>
+  </div>
+
+<script>
+const list = document.getElementById('list');
+const emptyState = document.getElementById('empty-state');
+const corpusBanner = document.getElementById('corpus-banner');
+let refreshPollTimer = null;
+
+function el(tag, cls, html) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (html !== undefined) e.innerHTML = html;
+  return e;
+}
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.innerText = s == null ? '' : s;
+  return d.innerHTML;
+}
+
+async function loadCandidates() {
+  list.innerHTML = '<div style="text-align:center; padding:40px; color:#8a97a1;">Loading…</div>';
+  let data;
+  try {
+    const resp = await fetch('/api/candidates');
+    data = await resp.json();
+    if (!data.ok) throw new Error(data.error || 'Request failed');
+  } catch (err) {
+    list.innerHTML = '';
+    const note = el('div', 'candidate', `<span style="color:#d92d20;">⚠️ Could not reach the console backend — is app.py running? (${escapeHtml(err.message)})</span>`);
+    list.appendChild(note);
+    emptyState.hidden = true;
+    return;
+  }
+
+  list.innerHTML = '';
+  if (data.candidates.length === 0) {
+    emptyState.hidden = false;
+    return;
+  }
+  emptyState.hidden = true;
+  data.candidates.forEach(renderCandidate);
+}
+
+function renderCandidate(c) {
+  const card = el('div', 'candidate');
+  card.appendChild(el('div', 'cand-top', `
+    <span class="cand-number">${escapeHtml(c.number)}</span>
+    <span class="badge">${escapeHtml(c.issue_id)}</span>
+    <span class="cand-sim">similarity ${c.similarity}</span>
+  `));
+  card.appendChild(el('div', 'cand-report', `
+    <span class="label">Original report</span>${escapeHtml(c.incident_text)}
+  `));
+  card.appendChild(el('div', 'cand-remedy', `
+    <span class="label">What approving this will run</span>${escapeHtml(c.remedy_explanation)}
+  `));
+
+  const actions = el('div', 'cand-actions');
+  const nameInput = el('input');
+  nameInput.type = 'text';
+  nameInput.placeholder = 'Your name (for the audit trail)';
+  const approveBtn = el('button', 'btn btn-primary', '✅ Approve & Run Fix');
+  actions.appendChild(nameInput);
+  actions.appendChild(approveBtn);
+  card.appendChild(actions);
+
+  approveBtn.onclick = () => confirmCandidate(c, card, actions, approveBtn, nameInput);
+
+  list.appendChild(card);
+}
+
+// After a fix runs, ServiceNow has the resolution but the BigQuery corpus
+// Week 2's retrieval reads from doesn't - the console kicks off a rebuild in
+// the background (see /api/candidates/confirm) and this polls its status so
+// there's a visible, honest answer to "did that actually take effect yet,"
+// instead of a number that silently never changes until someone remembers
+// to re-run two scripts by hand.
+async function pollRefreshStatus() {
+  let data;
+  try {
+    const resp = await fetch('/api/refresh_status');
+    data = await resp.json();
+  } catch (err) {
+    return; // transient - the next trigger (or reload) will try again
+  }
+  if (!data.ok) return;
+
+  if (refreshPollTimer) { clearTimeout(refreshPollTimer); refreshPollTimer = null; }
+
+  const corpusBtn = document.getElementById('refresh-corpus-btn');
+
+  if (data.status === 'running') {
+    corpusBanner.hidden = false;
+    corpusBanner.className = 'running';
+    corpusBanner.innerHTML = '<span class="spin"></span> Refreshing the search corpus so this fix\'s resolution becomes retrievable (re-embeds every resolved incident - can take a minute or two)…';
+    corpusBtn.disabled = true;
+    corpusBtn.textContent = 'Refreshing…';
+    refreshPollTimer = setTimeout(pollRefreshStatus, 3000);
+  } else if (data.status === 'done') {
+    corpusBanner.hidden = false;
+    corpusBanner.className = 'done';
+    corpusBanner.innerHTML = `&#10003; Corpus refreshed — ${data.corpus_size} resolved incident(s) now searchable.`;
+    corpusBtn.disabled = false;
+    corpusBtn.innerHTML = '&#8635; Rebuild Search Corpus';
+  } else if (data.status === 'error') {
+    corpusBanner.hidden = false;
+    corpusBanner.className = 'error';
+    corpusBanner.innerHTML = `&#9888; Corpus refresh failed: ${escapeHtml(data.error || 'unknown error')}`;
+    corpusBtn.disabled = false;
+    corpusBtn.innerHTML = '&#8635; Rebuild Search Corpus';
+  }
+  // status === 'idle': nothing has ever run in this process - leave the banner hidden.
+}
+
+// Manual trigger, independent of approving a candidate - lets someone force
+// (or just test) a corpus rebuild against whatever ServiceNow has right now,
+// without needing a pending incident to approve first.
+async function triggerCorpusRefresh() {
+  try {
+    await fetch('/api/refresh_corpus', { method: 'POST' });
+  } catch (err) {
+    corpusBanner.hidden = false;
+    corpusBanner.className = 'error';
+    corpusBanner.innerHTML = `&#9888; Could not start the refresh: ${escapeHtml(err.message)}`;
+    return;
+  }
+  pollRefreshStatus();
+}
+
+async function confirmCandidate(c, card, actions, approveBtn, nameInput) {
+  approveBtn.disabled = true;
+  approveBtn.textContent = 'Running…';
+  let result;
+  try {
+    const resp = await fetch('/api/candidates/confirm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sys_id: c.sys_id,
+        incident_text: c.incident_text,
+        issue_id: c.issue_id,
+        approved_by: nameInput.value.trim() || undefined,
+      }),
+    });
+    result = await resp.json();
+    if (!result.ok) throw new Error(result.error || 'Request failed');
+  } catch (err) {
+    approveBtn.disabled = false;
+    approveBtn.textContent = '✅ Approve & Run Fix';
+    const note = el('div', 'cand-result', `⚠️ Could not run the fix: ${escapeHtml(err.message)}`);
+    note.style.background = '#fdefee';
+    note.style.borderColor = '#f7c8c3';
+    note.style.color = '#d92d20';
+    card.appendChild(note);
+    return;
+  }
+
+  actions.remove();
+  const resolution = escapeHtml(result.resolution_text || '').replace(/\n/g, '<br>');
+  card.appendChild(el('div', 'cand-result', `
+    Resolved <strong>${escapeHtml(result.incident_number)}</strong>, approved by <strong>${escapeHtml(result.approved_by)}</strong>:<br><br>${resolution}
+  `));
+  card.classList.add('resolved');
+
+  pollRefreshStatus(); // a corpus rebuild just started (or is already running) - show it
+}
+
+loadCandidates();
+pollRefreshStatus(); // in case a refresh from a previous approval is still running on reload
+</script>
+</body>
+</html>
