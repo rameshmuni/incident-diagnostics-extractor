@@ -1,0 +1,23 @@
+# Copy this file to terraform.tfvars and fill in real values.
+# terraform.tfvars is where secrets actually live locally — add it to
+# .gitignore, never commit it. In a real prod setup these sensitive values
+# would come from a CI secret store, not a checked-in file at all.
+
+project_id         = "incident-assistant-507518"
+region             = "us-central1"
+
+demo_app_image     = "us-central1-docker.pkg.dev/incident-assistant-507518/aiops-repo/aiops-sdk-demo-app:latest"
+console_app_image  = "us-central1-docker.pkg.dev/incident-assistant-507518/aiops-repo/aiops-console-app:latest"
+
+bq_dataset_id      = "incident_assistant"
+
+github_owner       = "rameshmuni"
+github_repo        = "incident-diagnostics-extractor"
+github_branch      = "^main$"
+
+servicenow_instance  = "dev354741.service-now.com"
+servicenow_user      = "CHANGE_ME"
+servicenow_password  = "CHANGE_ME"
+gemini_api_key       = "CHANGE_ME"
+
+allow_unauthenticated = true
