@@ -1,7 +1,9 @@
 import os
 import sys
+import time
 
 from google import genai
+from google.genai import errors
 
 from query_incident import (
     ask_human_verdict,
@@ -19,6 +21,17 @@ from query_incident import (
 # the retrieval + reasoning path app.py actually uses on Cloud Run.
 
 GEMINI_MODEL = "gemini-3.6-flash"
+
+# Same shape of problem query_incident.py's _embed_with_retry() already handles for
+# embeddings: a 429/500/503 here means Gemini itself is rate-limiting us or is temporarily
+# overloaded ("This model is currently experiencing high demand..."), not that anything
+# about our request is wrong - retrying with backoff turns that into (at worst) a few
+# seconds' wait instead of a hard failure surfaced straight to the chat UI. Checked via the
+# SDK's own typed error (errors.APIError.code/.status) rather than string-matching, since
+# generate_content raises ClientError/ServerError with those set.
+CALL_MAX_RETRIES = 3
+CALL_INITIAL_BACKOFF_SECONDS = 2
+RETRYABLE_CODES = {429, 500, 503}
 
 _client = None
 
@@ -39,8 +52,22 @@ def get_client():
 
 def call_gemini(prompt, model=GEMINI_MODEL):
     client = get_client()
-    response = client.models.generate_content(model=model, contents=prompt)
-    return response.text
+    delay = CALL_INITIAL_BACKOFF_SECONDS
+    for attempt in range(1, CALL_MAX_RETRIES + 1):
+        try:
+            response = client.models.generate_content(model=model, contents=prompt)
+            return response.text
+        except errors.APIError as exc:
+            is_retryable = exc.code in RETRYABLE_CODES
+            if not is_retryable or attempt == CALL_MAX_RETRIES:
+                raise
+            print(
+                f"Gemini call failed with {exc.code} {exc.status} "
+                f"(attempt {attempt}/{CALL_MAX_RETRIES}), retrying in {delay}s...",
+                file=sys.stderr,
+            )
+            time.sleep(delay)
+            delay *= 2
 
 
 def main(new_incident_text=None):

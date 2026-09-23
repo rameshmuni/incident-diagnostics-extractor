@@ -91,7 +91,17 @@ def _embed_with_retry(text, task_type, model=EMBEDDING_MODEL):
                 raise RuntimeError("embed_content returned an empty embedding")
             return values
         except Exception as exc:  # noqa: BLE001 - only retryable cases get retried, everything else re-raises
-            is_retryable = "RESOURCE_EXHAUSTED" in str(exc) or "429" in str(exc) or "empty embedding" in str(exc)
+            # RESOURCE_EXHAUSTED/429 is rate-limiting; UNAVAILABLE/503 is Gemini being
+            # temporarily overloaded ("This model is currently experiencing high demand...")
+            # - both are worth retrying for the same reason, neither means our request was
+            # wrong.
+            is_retryable = (
+                "RESOURCE_EXHAUSTED" in str(exc)
+                or "429" in str(exc)
+                or "UNAVAILABLE" in str(exc)
+                or "503" in str(exc)
+                or "empty embedding" in str(exc)
+            )
             if not is_retryable or attempt == EMBED_MAX_RETRIES:
                 raise
             print(f"Embedding attempt {attempt}/{EMBED_MAX_RETRIES} failed ({exc}), waiting {delay}s...")
