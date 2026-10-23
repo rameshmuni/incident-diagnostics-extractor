@@ -3,7 +3,6 @@ import time
 from pathlib import Path
 
 import requests
-from requests.auth import HTTPBasicAuth
 from dotenv import load_dotenv
 
 from uipath_rca_dataset import RCA_RECORDS
@@ -13,10 +12,50 @@ load_dotenv(Path(__file__).resolve().parent / ".env")
 INSTANCE = os.environ["SN_INSTANCE"]
 USER = os.environ["SN_USER"]
 PASSWORD = os.environ["SN_PASS"]
+CLIENT_ID = os.environ["SN_CLIENT_ID"]
+CLIENT_SECRET = os.environ["SN_CLIENT_SECRET"]
 
 BASE_URL = f"https://{INSTANCE}.service-now.com/api/now"
-AUTH = HTTPBasicAuth(USER, PASSWORD)
-HEADERS = {"Accept": "application/json", "Content-Type": "application/json"}
+TOKEN_URL = f"https://{INSTANCE}.service-now.com/oauth_token.do"
+
+
+def _fetch_oauth_token():
+    # This instance has Basic Auth disabled for the REST API - confirmed by admin and a
+    # dedicated "Internal Integration User" both getting an identical 401 "User is not
+    # authenticated", which only happens when Basic Auth itself is rejected instance-wide,
+    # not a per-user/role problem. So auth is the OAuth2 Resource Owner Password
+    # Credentials grant instead, via the Application Registry (Client ID/Secret) set up
+    # for this project.
+    resp = requests.post(
+        TOKEN_URL,
+        data={
+            "grant_type": "password",
+            "client_id": CLIENT_ID,
+            "client_secret": CLIENT_SECRET,
+            "username": USER,
+            "password": PASSWORD,
+        },
+        timeout=30,
+    )
+    if not resp.ok:
+        raise RuntimeError(f"OAuth token request failed: {resp.status_code}\n{resp.text[:300]}")
+    return resp.json()["access_token"]
+
+
+# Fetched once per process - ServiceNow access tokens are valid ~30 minutes by default,
+# which is plenty for a single seeding run. A long-lived process (e.g. the Flask app)
+# would need to refresh this periodically instead of fetching once at import time.
+_ACCESS_TOKEN = _fetch_oauth_token()
+
+# Kept as None (not HTTPBasicAuth) purely so aiops_sdk/servicenow.py's list_open(), which
+# still passes auth=self._sn.AUTH, keeps working unchanged - requests treats auth=None as
+# "no basic auth", and the real auth now lives in the Authorization header in HEADERS.
+AUTH = None
+HEADERS = {
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+    "Authorization": f"Bearer {_ACCESS_TOKEN}",
+}
 
 
 def _check(resp):

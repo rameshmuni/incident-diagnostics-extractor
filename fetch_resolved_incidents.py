@@ -3,7 +3,6 @@ import os
 from pathlib import Path
 
 import requests
-from requests.auth import HTTPBasicAuth
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
@@ -11,10 +10,39 @@ load_dotenv(Path(__file__).resolve().parent / ".env")
 INSTANCE = os.environ["SN_INSTANCE"]
 USER = os.environ["SN_USER"]
 PASSWORD = os.environ["SN_PASS"]
+CLIENT_ID = os.environ["SN_CLIENT_ID"]
+CLIENT_SECRET = os.environ["SN_CLIENT_SECRET"]
 
 BASE_URL = f"https://{INSTANCE}.service-now.com/api/now"
-AUTH = HTTPBasicAuth(USER, PASSWORD)
-HEADERS = {"Accept": "application/json"}
+TOKEN_URL = f"https://{INSTANCE}.service-now.com/oauth_token.do"
+
+
+def _fetch_oauth_token():
+    # Same reason as seed_resolved_incidents.py: this instance has Basic Auth disabled for
+    # the REST API, so auth is the OAuth2 Resource Owner Password Credentials grant instead,
+    # via the same Application Registry client used there.
+    resp = requests.post(
+        TOKEN_URL,
+        data={
+            "grant_type": "password",
+            "client_id": CLIENT_ID,
+            "client_secret": CLIENT_SECRET,
+            "username": USER,
+            "password": PASSWORD,
+        },
+        timeout=30,
+    )
+    if not resp.ok:
+        raise RuntimeError(f"OAuth token request failed: {resp.status_code}\n{resp.text[:300]}")
+    return resp.json()["access_token"]
+
+
+_ACCESS_TOKEN = _fetch_oauth_token()
+AUTH = None  # kept for parity with seed_resolved_incidents.py's pattern; unused below
+HEADERS = {
+    "Accept": "application/json",
+    "Authorization": f"Bearer {_ACCESS_TOKEN}",
+}
 
 
 def fetch_resolved_incidents(limit=200):
@@ -23,7 +51,7 @@ def fetch_resolved_incidents(limit=200):
     fields = "sys_id,number,short_description,category,priority,close_notes"
     resp = requests.get(
         f"{BASE_URL}/table/incident",
-        auth=AUTH, headers=HEADERS, timeout=30,
+        headers=HEADERS, timeout=30,
         params={"sysparm_query": query, "sysparm_limit": limit, "sysparm_fields": fields},
     )
     resp.raise_for_status()
