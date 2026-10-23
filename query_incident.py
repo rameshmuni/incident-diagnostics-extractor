@@ -245,6 +245,63 @@ def ask_human_verdict(matches, slm_pick):
     return {"verdict": "corrected", "chosen_id": chosen["incident_id"], "chosen_text": chosen["text"]}
 
 
+def get_learned_override(new_incident_text, matches, log_file=FEEDBACK_LOG):
+    """Look back through the feedback log for a prior human verdict on this
+    exact incident text. Without this, log_feedback() below is write-only -
+    a "corrected" verdict gets recorded but nothing ever reads it back, so
+    the SLM makes the same wrong pick again the next time the same question
+    comes in. This closes that loop: if a reviewer previously corrected (or
+    confirmed) the pick for this exact text, and that chosen incident is
+    still among today's retrieved matches, reuse their answer instead of
+    asking the LLM again.
+
+    Exact-text match only (case/whitespace-insensitive) - this is a direct
+    recall of one specific past correction, not a semantic similarity
+    lookup, so paraphrased re-asks still go through normal retrieval +
+    generation.
+    """
+    if not os.path.exists(log_file):
+        return None
+
+    normalized = new_incident_text.strip().lower()
+    retrieved_ids = {m["incident_id"] for m in matches}
+    best = None  # log is append-only in chronological order, so the last match wins
+
+    with open(log_file) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if entry.get("new_incident_text", "").strip().lower() != normalized:
+                continue
+            verdict = entry.get("human_verdict")
+            if verdict not in ("corrected", "confirmed"):
+                continue
+            chosen = entry.get("human_chosen_id")
+            if not chosen or chosen not in retrieved_ids:
+                continue  # no longer one of today's retrieved matches - don't force a stale pick
+            best = chosen
+
+    return best
+
+
+def build_override_suggestion(matches, override_id):
+    """The same kind of suggestion text generate() would produce, but built
+    deterministically from a past human correction instead of asking the LLM
+    again - so the highlighted pick and the explanation text always agree,
+    and a confirmed correction can't silently drift on a later re-ask."""
+    chosen = next(m for m in matches if m["incident_id"] == override_id)
+    return (
+        f"A reviewer previously confirmed this exact issue matches {override_id} "
+        f"({chosen['short_description']}) - reusing that verdict instead of "
+        f"asking again.\n\n{chosen['text']}"
+    )
+
+
 def log_feedback(new_incident_text, matches, slm_pick, verdict, log_file=FEEDBACK_LOG):
     # append-only judgment log - this is the record a future confidence/auto-remediation decision would train on
     entry = {

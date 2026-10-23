@@ -39,6 +39,18 @@ class IncidentSearch:
         """Assemble the RAG prompt from retrieved past incidents."""
         return self._qi.build_prompt(text, matches)
 
+    def get_learned_override(self, text: str, matches):
+        """A prior human correction/confirmation for this exact incident
+        text, if one exists in the feedback log and its chosen incident is
+        still among today's retrieved matches - see
+        query_incident.get_learned_override() for why this exists."""
+        return self._qi.get_learned_override(text, matches)
+
+    def build_override_suggestion(self, matches, override_id):
+        """Deterministic suggestion text for a learned override, instead of
+        calling the LLM again."""
+        return self._qi.build_override_suggestion(matches, override_id)
+
     def corpus_size(self) -> int:
         """Live count of incidents currently in the BigQuery corpus."""
         return self._qi.corpus_size()

@@ -42,10 +42,22 @@ class AiopsSDK:
         """Week 2's retrieve-then-suggest flow as one call. Returns the
         retrieved matches plus the LLM's suggestion text - the caller still
         owns the human-verdict step (confirm / correct / none apply); this
-        method never writes anything to ServiceNow itself."""
+        method never writes anything to ServiceNow itself.
+
+        Checks the feedback log for a learned override first: if a reviewer
+        already corrected (or confirmed) the pick for this exact incident
+        text, and that chosen incident is still among today's retrieved
+        matches, reuse their verdict instead of asking the LLM again - this
+        is what makes a correction actually stick the next time the same
+        question comes in, instead of the same wrong pick resurfacing every
+        time."""
         matches = self.search.find_similar(incident_text, k=k)
-        prompt = self.search.build_prompt(incident_text, matches)
-        suggestion = self.llm_provider.generate(prompt)
+        override_id = self.search.get_learned_override(incident_text, matches)
+        if override_id:
+            suggestion = self.search.build_override_suggestion(matches, override_id)
+        else:
+            prompt = self.search.build_prompt(incident_text, matches)
+            suggestion = self.llm_provider.generate(prompt)
         return {"matches": matches, "suggestion": suggestion}
 
     def propose_remedy(self, incident_text: str) -> dict:
