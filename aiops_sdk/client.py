@@ -38,7 +38,7 @@ class AiopsSDK:
         self.remediate = Remediator()
         self.servicenow = ServiceNowClient()
 
-    def suggest(self, incident_text: str, k: int = 5) -> dict:
+    def suggest(self, incident_text: str, k: int = 3) -> dict:
         """Week 2's retrieve-then-suggest flow as one call. Returns the
         retrieved matches plus the LLM's suggestion text - the caller still
         owns the human-verdict step (confirm / correct / none apply); this

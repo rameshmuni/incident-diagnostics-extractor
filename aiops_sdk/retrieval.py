@@ -26,11 +26,11 @@ class IncidentSearch:
         """Turn new incident text into a search vector."""
         return self._qi.embed_query(text)
 
-    def search(self, query_vector, k: int = 5):
+    def search(self, query_vector, k: int = 3):
         """BigQuery VECTOR_SEARCH for the k closest past incidents."""
         return self._qi.search(query_vector, k=k)
 
-    def find_similar(self, text: str, k: int = 5):
+    def find_similar(self, text: str, k: int = 3):
         """One call for the two steps app.py's api_query() always runs back
         to back on the human-in-the-loop path: embed, then search."""
         return self.search(self.embed(text), k=k)
