@@ -1,6 +1,6 @@
 # aiops_sdk_demo_app
 
-A second, complete copy of the AIOps Virtual Agent web app - same UI, same
+A second, complete copy of the RPA Copilot web app - same UI, same
 behavior on the retrieval side - except its backend is built on `aiops_sdk`
 instead of six separate script imports, and it has **no code path capable of
 running a remedy script.** Where `app.py` (the original) has:
