@@ -541,6 +541,7 @@ async function submitVerdict(text, data, verdictType, chosenId, bubble) {
       }),
     });
     result = await resp.json();
+    if (!resp.ok) throw new Error(result.error || 'Request failed');
   } catch (err) {
     removeTyping();
     addSystemNote('⚠️ Could not log the verdict — is app.py running? (' + err.message + ')');

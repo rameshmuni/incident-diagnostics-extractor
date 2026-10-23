@@ -12,7 +12,7 @@ from google import genai
 from google.genai import types as genai_types
 from google.cloud import bigquery
 
-from seed_resolved_incidents import BASE_URL, AUTH, HEADERS, _check, _parse_json, get_caller_sys_id
+from seed_resolved_incidents import BASE_URL, AUTH, HEADERS, _check, _parse_json, get_caller_sys_id, request_with_retry
 
 # Google-native retrieval: Gemini's embedding model stands in for sentence-transformers,
 # BigQuery's VECTOR_SEARCH stands in for FAISS. See learning_plan_gcp_native.md for the
@@ -274,7 +274,7 @@ def create_escalation_incident(new_incident_text):
         "priority": "3",
         "caller_id": caller_sys_id,
     }
-    resp = _check(requests.post(f"{BASE_URL}/table/incident", auth=AUTH, headers=HEADERS, timeout=30, json=payload))
+    resp = _check(request_with_retry("post", f"{BASE_URL}/table/incident", json=payload))
     return _parse_json(resp)["result"]
 
 

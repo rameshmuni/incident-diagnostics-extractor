@@ -42,9 +42,10 @@ def _fetch_oauth_token():
     return resp.json()["access_token"]
 
 
-# Fetched once per process - ServiceNow access tokens are valid ~30 minutes by default,
-# which is plenty for a single seeding run. A long-lived process (e.g. the Flask app)
-# would need to refresh this periodically instead of fetching once at import time.
+# Fetched once at import time, then refreshed automatically on any 401 - ServiceNow
+# access tokens default to a ~30 minute lifespan, but this module backs long-running
+# Flask processes (aiops_sdk_demo_app, aiops_console_app) that can stay up far longer
+# than that, so a one-time fetch alone would silently start failing mid-process.
 _ACCESS_TOKEN = _fetch_oauth_token()
 
 # Kept as None (not HTTPBasicAuth) purely so aiops_sdk/servicenow.py's list_open(), which
@@ -56,6 +57,34 @@ HEADERS = {
     "Content-Type": "application/json",
     "Authorization": f"Bearer {_ACCESS_TOKEN}",
 }
+
+
+def _refresh_token():
+    # Called when a request comes back 401 - re-authenticates and updates HEADERS
+    # in place (not a new dict) so every other module that imported HEADERS by
+    # reference (query_incident.py, aiops_sdk/servicenow.py) picks up the new
+    # token automatically, with no re-import needed.
+    global _ACCESS_TOKEN
+    _ACCESS_TOKEN = _fetch_oauth_token()
+    HEADERS["Authorization"] = f"Bearer {_ACCESS_TOKEN}"
+
+
+def request_with_retry(method, url, **kwargs):
+    """Authenticated request that retries once, with a fresh token, on a 401 -
+    the symptom of the access token having expired mid-process. Every call that
+    hits ServiceNow's Table API (here, in query_incident.py, and in
+    aiops_sdk/servicenow.py's list_open()) should go through this instead of
+    calling requests.* directly, or an expired token fails silently instead of
+    self-healing."""
+    kwargs.setdefault("auth", AUTH)
+    kwargs.setdefault("timeout", 30)
+    kwargs["headers"] = HEADERS
+    resp = getattr(requests, method)(url, **kwargs)
+    if resp.status_code == 401:
+        _refresh_token()
+        kwargs["headers"] = HEADERS
+        resp = getattr(requests, method)(url, **kwargs)
+    return resp
 
 
 def _check(resp):
@@ -86,8 +115,8 @@ def _parse_json(resp):
 
 def get_caller_sys_id():
     # resolving an incident on this instance requires a Caller - reuse the admin account for that
-    resp = _check(requests.get(
-        f"{BASE_URL}/table/sys_user", auth=AUTH, headers=HEADERS, timeout=30,
+    resp = _check(request_with_retry(
+        "get", f"{BASE_URL}/table/sys_user",
         params={"sysparm_query": f"user_name={USER}", "sysparm_fields": "sys_id", "sysparm_limit": 1},
     ))
     return _parse_json(resp)["result"][0]["sys_id"]
@@ -102,7 +131,7 @@ def create_incident(record, caller_sys_id):
         "priority": record["priority"],
         "caller_id": caller_sys_id,
     }
-    resp = _check(requests.post(f"{BASE_URL}/table/incident", auth=AUTH, headers=HEADERS, timeout=30, json=payload))
+    resp = _check(request_with_retry("post", f"{BASE_URL}/table/incident", json=payload))
     return _parse_json(resp)["result"]
 
 
@@ -117,7 +146,7 @@ def resolve_incident(sys_id, record):
         "close_code": "Solution provided",  # confirmed valid choice value on this instance
         "close_notes": close_notes,
     }
-    resp = _check(requests.patch(f"{BASE_URL}/table/incident/{sys_id}", auth=AUTH, headers=HEADERS, timeout=30, json=payload))
+    resp = _check(request_with_retry("patch", f"{BASE_URL}/table/incident/{sys_id}", json=payload))
     return _parse_json(resp)["result"]
 
 

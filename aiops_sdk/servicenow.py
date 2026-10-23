@@ -89,11 +89,9 @@ class ServiceNowClient:
         if description_contains:
             query_parts.append(f"descriptionLIKE{description_contains}")
 
-        resp = requests.get(
+        resp = self._sn.request_with_retry(
+            "get",
             f"{self._sn.BASE_URL}/table/incident",
-            auth=self._sn.AUTH,
-            headers=self._sn.HEADERS,
-            timeout=30,
             params={
                 "sysparm_query": "^".join(query_parts),
                 "sysparm_fields": "sys_id,number,short_description,description,priority,category,state,opened_at",
