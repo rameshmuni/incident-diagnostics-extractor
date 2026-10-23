@@ -24,6 +24,13 @@ EMBEDDING_MODEL = "gemini-embedding-2"
 EMBEDDING_DIMENSIONS = 768
 BQ_DATASET = os.environ.get("BQ_DATASET", "incident_assistant")
 BQ_TABLE = os.environ.get("BQ_TABLE", "incident_corpus")
+# Durable home for human verdicts (confirm/correct/none-apply) - see log_feedback() and
+# get_learned_override() below. Feedback used to live only in feedback_log.jsonl on local
+# disk, which doesn't survive a Cloud Run redeploy or scale-to-zero - a correction could
+# silently stop sticking once the instance that logged it recycled. Same dataset as the
+# corpus, separate table, since the two have very different write patterns (corpus:
+# truncate-and-reload in bulk; feedback: append one row at a time, forever).
+BQ_FEEDBACK_TABLE = os.environ.get("BQ_FEEDBACK_TABLE", "incident_feedback")
 OLLAMA_URL = "http://localhost:11434/api/generate"
 SLM_MODEL = "llama3.2"
 TOP_K = 3
@@ -63,6 +70,35 @@ def get_bq_client():
 def table_ref(client=None):
     client = client or get_bq_client()
     return f"{client.project}.{BQ_DATASET}.{BQ_TABLE}"
+
+
+FEEDBACK_SCHEMA = [
+    bigquery.SchemaField("timestamp", "TIMESTAMP"),
+    bigquery.SchemaField("new_incident_text", "STRING"),
+    bigquery.SchemaField("retrieved_ids", "STRING", mode="REPEATED"),
+    bigquery.SchemaField("slm_pick", "STRING"),
+    bigquery.SchemaField("human_verdict", "STRING"),
+    bigquery.SchemaField("human_chosen_id", "STRING"),
+]
+
+_feedback_table_ensured = False
+
+
+def feedback_table_ref(client=None):
+    client = client or get_bq_client()
+    return f"{client.project}.{BQ_DATASET}.{BQ_FEEDBACK_TABLE}"
+
+
+def ensure_feedback_table(client=None):
+    # idempotent, cached per-process so a normal request doesn't pay for the exists_ok
+    # metadata round-trip every time - only the first call after a cold start does
+    global _feedback_table_ensured
+    if _feedback_table_ensured:
+        return
+    client = client or get_bq_client()
+    client.create_dataset(bigquery.DatasetReference(client.project, BQ_DATASET), exists_ok=True)
+    client.create_table(bigquery.Table(feedback_table_ref(client), schema=FEEDBACK_SCHEMA), exists_ok=True)
+    _feedback_table_ensured = True
 
 
 EMBED_MAX_RETRIES = 5
@@ -245,28 +281,14 @@ def ask_human_verdict(matches, slm_pick):
     return {"verdict": "corrected", "chosen_id": chosen["incident_id"], "chosen_text": chosen["text"]}
 
 
-def get_learned_override(new_incident_text, matches, log_file=FEEDBACK_LOG):
-    """Look back through the feedback log for a prior human verdict on this
-    exact incident text. Without this, log_feedback() below is write-only -
-    a "corrected" verdict gets recorded but nothing ever reads it back, so
-    the SLM makes the same wrong pick again the next time the same question
-    comes in. This closes that loop: if a reviewer previously corrected (or
-    confirmed) the pick for this exact text, and that chosen incident is
-    still among today's retrieved matches, reuse their answer instead of
-    asking the LLM again.
-
-    Exact-text match only (case/whitespace-insensitive) - this is a direct
-    recall of one specific past correction, not a semantic similarity
-    lookup, so paraphrased re-asks still go through normal retrieval +
-    generation.
-    """
+def _override_from_local_log(normalized, retrieved_ids, log_file):
+    # Fallback path only - used when BigQuery itself is unreachable (or the table hasn't
+    # been created yet). Same matching rules as the BigQuery query below: exact
+    # case/whitespace-insensitive text match, verdict confirmed/corrected, chosen incident
+    # still among today's retrieved matches, latest entry wins.
     if not os.path.exists(log_file):
         return None
-
-    normalized = new_incident_text.strip().lower()
-    retrieved_ids = {m["incident_id"] for m in matches}
-    best = None  # log is append-only in chronological order, so the last match wins
-
+    best = None
     with open(log_file) as f:
         for line in f:
             line = line.strip()
@@ -278,15 +300,62 @@ def get_learned_override(new_incident_text, matches, log_file=FEEDBACK_LOG):
                 continue
             if entry.get("new_incident_text", "").strip().lower() != normalized:
                 continue
-            verdict = entry.get("human_verdict")
-            if verdict not in ("corrected", "confirmed"):
+            if entry.get("human_verdict") not in ("corrected", "confirmed"):
                 continue
             chosen = entry.get("human_chosen_id")
             if not chosen or chosen not in retrieved_ids:
-                continue  # no longer one of today's retrieved matches - don't force a stale pick
+                continue
             best = chosen
-
     return best
+
+
+def get_learned_override(new_incident_text, matches, log_file=FEEDBACK_LOG):
+    """A prior human verdict on this exact incident text, if one exists.
+
+    Without this, log_feedback() below is write-only - a "corrected" verdict
+    gets recorded but nothing ever reads it back, so the SLM makes the same
+    wrong pick again the next time the same question comes in. This closes
+    that loop: if a reviewer previously corrected (or confirmed) the pick
+    for this exact text, and that chosen incident is still among today's
+    retrieved matches, reuse their answer instead of asking the LLM again.
+
+    BigQuery is the primary, durable source (see BQ_FEEDBACK_TABLE) - it
+    survives a Cloud Run redeploy or scale-to-zero, unlike the local
+    feedback_log.jsonl file, which only ever reflected what this one
+    instance happened to log before it recycled. If BigQuery itself can't
+    be reached (or the table doesn't exist yet), this falls back to the
+    local file instead of failing the whole request.
+
+    Exact-text match only (case/whitespace-insensitive) - this is a direct
+    recall of one specific past correction, not a semantic similarity
+    lookup, so paraphrased re-asks still go through normal retrieval +
+    generation.
+    """
+    normalized = new_incident_text.strip().lower()
+    retrieved_ids = {m["incident_id"] for m in matches}
+    if not retrieved_ids:
+        return None
+
+    try:
+        client = get_bq_client()
+        query = f"""
+            SELECT human_chosen_id
+            FROM `{feedback_table_ref(client)}`
+            WHERE LOWER(TRIM(new_incident_text)) = @normalized_text
+              AND human_verdict IN ('corrected', 'confirmed')
+              AND human_chosen_id IN UNNEST(@retrieved_ids)
+            ORDER BY timestamp DESC
+            LIMIT 1
+        """
+        job_config = bigquery.QueryJobConfig(query_parameters=[
+            bigquery.ScalarQueryParameter("normalized_text", "STRING", normalized),
+            bigquery.ArrayQueryParameter("retrieved_ids", "STRING", list(retrieved_ids)),
+        ])
+        rows = list(client.query(query, job_config=job_config).result())
+        return rows[0]["human_chosen_id"] if rows else None
+    except Exception as exc:  # noqa: BLE001 - BigQuery unreachable or table not created yet
+        print(f"[get_learned_override] BigQuery lookup failed, falling back to local log: {exc}")
+        return _override_from_local_log(normalized, retrieved_ids, log_file)
 
 
 def build_override_suggestion(matches, override_id):
@@ -303,7 +372,8 @@ def build_override_suggestion(matches, override_id):
 
 
 def log_feedback(new_incident_text, matches, slm_pick, verdict, log_file=FEEDBACK_LOG):
-    # append-only judgment log - this is the record a future confidence/auto-remediation decision would train on
+    # append-only judgment log - this is the record a future confidence/auto-remediation
+    # decision (and get_learned_override() above) trains on
     entry = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "new_incident_text": new_incident_text,
@@ -314,6 +384,19 @@ def log_feedback(new_incident_text, matches, slm_pick, verdict, log_file=FEEDBAC
     }
     with open(log_file, "a") as f:
         f.write(json.dumps(entry) + "\n")
+
+    # BigQuery is the durable copy get_learned_override() actually reads back - the local
+    # file above lives on this Cloud Run instance's ephemeral disk only. A BQ hiccup here
+    # shouldn't break the verdict response the user is waiting on, so this degrades to
+    # "local-only for now" (still logged, just not durable yet) instead of raising.
+    try:
+        client = get_bq_client()
+        ensure_feedback_table(client)
+        errors = client.insert_rows_json(feedback_table_ref(client), [entry])
+        if errors:
+            print(f"[log_feedback] BigQuery insert reported row errors, local log still has this entry: {errors}")
+    except Exception as exc:  # noqa: BLE001 - see comment above
+        print(f"[log_feedback] BigQuery insert failed, local log still has this entry: {exc}")
 
 
 def create_escalation_incident(new_incident_text):
