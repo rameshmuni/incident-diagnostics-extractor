@@ -1,0 +1,7 @@
+requests
+python-dotenv
+chromadb
+langchain-community
+atlassian-python-api
+beautifulsoup4
+lxml
